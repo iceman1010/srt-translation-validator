@@ -8,11 +8,13 @@ use LanguageDetection\Language;
 class SrtTranslationValidator
 {
     private $languageDetector;
+    private $formatValidator;
     private $timestampTolerance = 0.5; // 500ms tolerance for timestamp comparison
 
     public function __construct()
     {
         $this->languageDetector = new Language();
+        $this->formatValidator = new SubtitleFormatValidator();
     }
 
     public function validate(string $originalPath, string $translationPath, string $expectedLanguage): array
@@ -22,19 +24,50 @@ class SrtTranslationValidator
             'defects' => []
         ];
 
-        $original = $this->parseSubtitles($originalPath);
-        if ($original === null) {
+        $originalFormat = $this->formatValidator->validateFile($originalPath);
+        if ($originalFormat['format'] === null) {
             return [
                 'valid' => false,
-                'defects' => [['type' => 'invalid_format', 'message' => 'Failed to parse original subtitle file']]
+                'defects' => $this->formatDefects($originalFormat)
+            ];
+        }
+        if (!$originalFormat['valid']) {
+            return [
+                'valid' => false,
+                'defects' => $this->formatDefects($originalFormat)
             ];
         }
 
-        $translation = $this->parseSubtitles($translationPath);
-        if ($translation === null) {
+        $translationFormat = $this->formatValidator->validateFile($translationPath);
+        if ($translationFormat['format'] === null) {
             return [
                 'valid' => false,
-                'defects' => [['type' => 'invalid_format', 'message' => 'Failed to parse translation subtitle file']]
+                'defects' => $this->formatDefects($translationFormat)
+            ];
+        }
+        if (!$translationFormat['valid']) {
+            return [
+                'valid' => false,
+                'defects' => $this->formatDefects($translationFormat)
+            ];
+        }
+
+        if ($originalFormat['format'] !== $translationFormat['format']) {
+            return [
+                'valid' => false,
+                'defects' => [[
+                    'type' => 'invalid_format',
+                    'message' => "Format mismatch: original file is {$originalFormat['format']} but translation is {$translationFormat['format']}"
+                ]]
+            ];
+        }
+
+        $original = $this->parseSubtitles($originalPath);
+        $translation = $this->parseSubtitles($translationPath);
+        if ($original === null || $translation === null) {
+            return [
+                'valid' => false,
+                'defects' => [['type' => 'invalid_format', 'message' => 'Failed to parse subtitle file after format validation passed']]
             ];
         }
 
@@ -48,6 +81,24 @@ class SrtTranslationValidator
         $results['valid'] = empty($results['defects']);
 
         return $results;
+    }
+
+    private function formatDefects(array $formatResult): array
+    {
+        $defects = [];
+        if (empty($formatResult['errors'])) {
+            $defects[] = ['type' => 'invalid_format', 'message' => 'Subtitle file could not be read or parsed'];
+            return $defects;
+        }
+        foreach ($formatResult['errors'] as $error) {
+            $defects[] = [
+                'type' => 'invalid_format',
+                'subtype' => $error['subtype'],
+                'line' => $error['line'],
+                'message' => $error['message']
+            ];
+        }
+        return $defects;
     }
 
     private function parseSubtitles(string $path): ?Subtitles
