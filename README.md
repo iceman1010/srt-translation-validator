@@ -10,42 +10,47 @@ subtitle file against its **translation** and reports four kinds of defects:
 | `partial_translation` | Large caption blocks detected in the wrong language (e.g. left untranslated) |
 | `timestamp_mismatch`  | Captions whose start/end times drifted beyond a tolerance                |
 
-It ships both as a **Composer library** and as a **standalone command-line
-tool** (the `bin/srt-validator` entry point, also packaged as a PHAR).
+This project is used in two different ways, so this README is split in two:
+
+| Who you are                          | Jump to                                          |
+| ------------------------------------ | ------------------------------------------------ |
+| You just want to check subtitle files from a terminal | [For command-line users](#for-command-line-users) |
+| You want to call the validator from your own PHP code | [For PHP developers](#for-php-developers)         |
+
+---
+
+# For command-line users
+
+You don't need to write any code. Download the pre-built `srt-translation-validator.phar`
+(a single executable file), run it against the two subtitle files, and read the report.
 
 ## Requirements
 
-- PHP 7.4+ (8.x recommended)
-- [Composer](https://getcomposer.org/)
-- Extensions: `mbstring`, and for PHAR builds `phar` + `zlib`
+- PHP 7.4+ on your machine (no Composer, no composer packages needed)
 
-## Installation
+## Downloading
 
-```bash
-composer require srt/translation-validator
-```
-
-or, from this repository:
+Get the PHAR from the **Releases** page of this project's GitHub repository
+(each release is named `v1.0.0`, `v1.0.1`, ... and carries the PHAR as an
+asset):
 
 ```bash
-composer install
+# download srt-translation-validator.phar from the latest release, then:
+chmod +x srt-translation-validator.phar
+sudo mv srt-translation-validator.phar /usr/local/bin/srt-translation-validator
 ```
 
-## Command-line usage
+After that, `srt-translation-validator` works as a normal command.
 
-The CLI accepts exactly two positional arguments – the two subtitle files –
+## Usage
+
+```bash
+srt-translation-validator <original-file> <translation-file> [options]
+```
+
+The CLI accepts exactly two positional arguments – the original subtitle file
+(also called the reference) and the file being validated (the translation) –
 compares them, and prints a human-readable report.
-
-```bash
-php bin/srt-validator <original-file> <translation-file> [options]
-```
-
-When this package is installed as a dependency of another project, Composer
-publishes a proxy so the short form works too:
-
-```bash
-srt-validator <original-file> <translation-file> [options]
-```
 
 ### Options
 
@@ -54,6 +59,8 @@ srt-validator <original-file> <translation-file> [options]
 | `-l, --lang=CODE`      | Expected language of the translation (ISO 639-1, e.g. `de`). Default: auto-detected from the translation text. |
 | `-t, --tolerance=SEC`  | Timestamp drift tolerance in seconds (default: `0.5`).                   |
 | `-h, --help`           | Show usage help.                                                         |
+| `-V, --version`        | Print the version and exit.                                              |
+| `--update[=version]`   | Update the tool to the latest release (or a specific version, e.g. `--update=1.0.1`). |
 
 ### Exit codes
 
@@ -67,13 +74,13 @@ srt-validator <original-file> <translation-file> [options]
 
 ```bash
 # Compare and auto-detect the translation language
-php bin/srt-validator original.srt translation.de.srt
+srt-translation-validator original.srt translation.de.srt
 
 # Explicit expected language
-srt-validator original.srt translation.srt -l de
+srt-translation-validator original.srt translation.srt -l de
 
 # Stricter timestamp tolerance (100 ms)
-srt-validator -t 0.1 -l de Movie.en.srt Movie.pt.srt
+srt-translation-validator -t 0.1 -l de Movie.en.srt Movie.pt.srt
 ```
 
 ### Example report
@@ -106,9 +113,41 @@ drift      : start +2.000s, end +2.000s
 
 A valid translation prints `RESULT: PASSED` and exits `0`.
 
-## Using the library in PHP
+## Updating the tool
 
-### Full validation
+```bash
+srt-translation-validator --update            # update to the latest release
+srt-translation-validator --update=1.0.1      # update to a specific version
+```
+
+This fetches the release from GitHub, downloads the new PHAR, sanity-checks it
+and atomically replaces the running file. If the file is not writable (e.g.
+installed in `/usr/local/bin` as root), run it with `sudo`.
+
+---
+
+# For PHP developers
+
+Call the validation logic directly from your own PHP code via Composer.
+
+## Requirements
+
+- PHP 7.4+ (8.x recommended)
+- [Composer](https://getcomposer.org/)
+- Extension `mbstring`
+
+## Installation
+
+```bash
+composer require srt/translation-validator
+```
+
+This also publishes the `srt-validator` binary, so the command-line tool from
+the previous section is available in `vendor/bin/` too.
+
+## Full validation
+
+Compare an original subtitle file against its translation, all in one call:
 
 ```php
 <?php
@@ -142,6 +181,8 @@ foreach ($result['defects'] as $i => $defect) {
     );
 }
 ```
+
+### Result structure
 
 The `defects` array returned by `validate()` looks like this:
 
@@ -181,7 +222,7 @@ The `defects` array returned by `validate()` looks like this:
 ]
 ```
 
-### Validation of file format only
+## Validation of file format only
 
 If you only need to check the SRT/WebVTT structure of one file:
 
@@ -218,7 +259,11 @@ un-numbered cues, `X1:Y1` coordinate extensions, BOM and CRLF/CR line
 endings, and for WebVTT: cue identifiers/settings, `NOTE`, `STYLE`, `REGION`
 blocks and negative timestamps.
 
-## Building the PHAR
+## Development
+
+Everything below is for people working on the *validator itself*.
+
+### Building the PHAR
 
 A self-contained `srt-translation-validator.phar` (no Composer needed to run
 it) can be built from this repository:
@@ -235,29 +280,11 @@ composer run build-phar
 ```
 
 The PHAR bundles `src/`, `bin/` and the production `vendor/` tree, so it runs
-on any machine with PHP 7.4+:
+on any machine with PHP 7.4+. The GitHub repository used by `--update` is
+auto-detected from the `origin` remote and embedded into the PHAR; override it
+in `build/build-phar.php` if needed.
 
-```bash
-php build/srt-translation-validator.phar original.srt translation.srt -l de
-# or, it is executable:
-./build/srt-translation-validator.phar original.srt translation.srt
-```
-
-## Continuous integration / release
-
-The repository ships a GitHub Actions workflow (`.github/workflows/build-phar.yml`)
-that:
-
-1. Runs the PHPUnit suite on PHP 8.1, 8.2 and 8.3.
-2. Builds the PHAR from a `--no-dev` install.
-3. Verifies the PHAR signature and smoke-tests it against real comparisons
-   (valid → exit 0, missing captions → exit 1, malformed format → exit 1).
-4. Uploads the PHAR as a workflow artifact on every push/PR.
-5. Attaches the PHAR to a GitHub *Release* when a tag such as `v1.0.0` is
-   pushed. Versions are then downloadable from
-   `<repo>/releases/latest`.
-
-## Tests
+### Running the tests
 
 ```bash
 composer test
@@ -270,16 +297,33 @@ end-to-end CLI tests. Most are self-contained; the tests that rely on the
 large example subtitle files automatically skip when those local fixtures are
 not checked out.
 
+### Releasing a new version
+
+The version lives in the `VERSION` file at the repository root (plain semver,
+e.g. `1.0.0`). The release process:
+
+1. Bump `VERSION` (patch for fixes, minor for features).
+2. Commit the bump **together with** the change, and push to `main`.
+3. A GitHub Actions workflow (`.github/workflows/build-phar.yml`) runs the
+   tests on PHP 8.1/8.2/8.3, builds the PHAR, verifies it, and creates/updates
+   the GitHub **Release** `v<VERSION>` with the PHAR attached.
+
+If you push a change without bumping `VERSION`, the workflow still builds and
+tests, and the existing release is updated in place. Users on the old PHAR can
+then run `--update`.
+
 ## Project layout
 
 ```
 src/                          Library classes (PSR-4: SrtValidator\)
   SrtTranslationValidator.php Full translation validation logic
   SubtitleFormatValidator.php Regex-based SRT/WebVTT structure validation
-  Cli.php                     CLI argument parsing and report rendering
+  Cli.php                     CLI parsing, report rendering, --version/--update
 bin/srt-validator             Executable command-line entry point
-build/build-phar.php          PHAR builder
+build/build-phar.php          PHAR builder (embeds VERSION + release repo)
+VERSION                       Current release version (drives the GitHub release)
 examples/                     Local (gitignored) example fixtures + defect files
 tests/                        PHPUnit test suite
 .github/workflows/            CI + release workflow
+AGENTS.md                     Workflow rules for AI agents (version bumping)
 ```
