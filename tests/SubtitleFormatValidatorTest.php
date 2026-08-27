@@ -22,9 +22,9 @@ class SubtitleFormatValidatorTest extends TestCase
         }
     }
 
-    private function assertInvalid(string $content, string $subtype): array
+    private function assertInvalid(string $content, string $subtype, string $extension = ''): array
     {
-        $result = $this->validator->validateContent($content);
+        $result = $this->validator->validateContent($content, $extension);
         $this->assertFalse($result['valid'], 'File should be invalid');
         $this->assertNotEmpty($result['errors'], 'Should produce at least one error');
         $matches = array_filter($result['errors'], function ($e) use ($subtype) {
@@ -407,7 +407,9 @@ VTT;
 No WEBVTT header
 
 VTT;
-        $this->assertInvalid($content, 'missing_webvtt_header');
+        // A headerless VTT cannot be told apart from dot-separator SRT by
+        // content alone, so the .vtt extension is what forces the header check.
+        $this->assertInvalid($content, 'missing_webvtt_header', 'vtt');
     }
 
     public function testVttWithCommaMillisecondsIsInvalid(): void

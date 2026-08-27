@@ -33,10 +33,12 @@ class SubtitleFormatValidator
     /**
      * SRT timing line.
      * Optional leading sequence number on the same line, HH:MM:SS with a
-     * comma or period millisecond separator, " --> " arrow, optional
-     * X-coordinate extensions. Minutes/seconds tolerantly allow 1-2 digits.
+     * comma or period millisecond separator, " --> " arrow. Anything after
+     * the end timestamp (e.g. X1:X2:Y1:Y2 coordinate extensions) is accepted
+     * via a tolerant single-group tail, matching how production parsers
+     * (cdown/srt, OmniVoice) handle it. Minutes/seconds tolerate 1-2 digits.
      */
-    public const SRT_TIMING_RE = '/^(?:(?<num>\d+)\s+)?(?:(?<sh>\d{1,3}):(?<sm>\d{1,2}):(?<ss>\d{1,2}))[,.]\d{1,3}\s*-->\s*(?:(?<eh>\d{1,3}):(?<em>\d{1,2}):(?<es>\d{1,2}))[,.]\d{1,3}(?:\s+X\d+:[^\s]+)*\s*$/';
+    public const SRT_TIMING_RE = '/^(?:(?<num>\d+)\s+)?(?<sh>\d{1,3}):(?<sm>\d{1,2}):(?<ss>\d{1,2})[,.]\d{1,3}\s*-->\s*(?<eh>\d{1,3}):(?<em>\d{1,2}):(?<es>\d{1,2})[,.]\d{1,3}(?:\s.*)?$/';
 
     /**
      * WebVTT cue timings.
@@ -116,8 +118,21 @@ class SubtitleFormatValidator
         $warnings = [];
 
         $format = $this->detectFormat($content);
+        $extLower = strtolower($extension);
         if ($format === self::FORMAT_VTT) {
             $cueCount = $this->validateVtt($lines, $errors, $warnings);
+        } elseif (in_array($extLower, ['vtt', 'webvtt'], true)) {
+            // A file claiming to be WebVTT is validated as such unless its
+            // timings are unmistakably SRT (comma millisecond separator).
+            // Without this, a .vtt file missing its WEBVTT header would
+            // silently pass as SRT instead of reporting the defect.
+            if ($this->looksLikeSrtTimings($lines)) {
+                $format = self::FORMAT_SRT;
+                $cueCount = $this->validateSrt($lines, $errors, $warnings);
+            } else {
+                $format = self::FORMAT_VTT;
+                $cueCount = $this->validateVtt($lines, $errors, $warnings);
+            }
         } else {
             $format = self::FORMAT_SRT;
             $cueCount = $this->validateSrt($lines, $errors, $warnings);
@@ -228,6 +243,22 @@ class SubtitleFormatValidator
                 if (!$inCue && $next !== null && $this->containsArrow($lines[$next])) {
                     $pendingNumber = (int)$line;
                     $pendingNumberLine = $lineNo;
+                    $i++;
+                    continue;
+                }
+                // A bare number at the start of a block whose next line is not
+                // a timing line: report the missing timestamp where it should
+                // have been (the following line) and absorb the block.
+                if (!$inCue && !$broken && $next !== null) {
+                    $errorOffset = $next + 1;
+                    $errors[] = [
+                        'line' => $errorOffset,
+                        'subtype' => 'missing_timestamp',
+                        'message' => "Line {$errorOffset}: expected a timing line (HH:MM:SS[,.]mmm --> HH:MM:SS[,.]mmm) after sequence number {$line} but found: " . $this->preview($lines[$next])
+                    ];
+                    $broken = true;
+                    $inCue = true;
+                    $cueTextLines = 1;
                     $i++;
                     continue;
                 }
@@ -479,6 +510,21 @@ class SubtitleFormatValidator
         return strpos($line, '-->') !== false
             || strpos($line, '->') !== false
             || preg_match('/\x{2192}|\x{2794}/u', $line) === 1;
+    }
+
+    /**
+     * True when any timing line uses SRT's comma millisecond separator.
+     * WebVTT only allows a period, so comma-ms timings are unmistakably SRT
+     * even when the WEBVTT header is absent.
+     */
+    private function looksLikeSrtTimings(array $lines): bool
+    {
+        foreach ($lines as $line) {
+            if ($this->containsArrow($line) && preg_match('/,\d{1,3}/', $line)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function nextNonEmptyIndex(array $lines, int $from): ?int
