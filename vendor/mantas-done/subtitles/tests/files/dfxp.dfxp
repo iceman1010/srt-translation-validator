@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<tt xmlns:tt="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:tts="http://www.w3.org/ns/ttml#styling" ttp:tickRate="10000000" ttp:timeBase="media" xmlns="http://www.w3.org/ns/ttml">
+<head>
+<ttp:profile use="http://netflix.com/ttml/profile/dfxp-ls-sdh"/>
+<styling>
+<style tts:backgroundColor="transparent" tts:textAlign="center" xml:id="style0"/>
+<style tts:color="white" tts:fontSize="100%" tts:fontWeight="normal" xml:id="style1"/>
+<style tts:color="white" tts:fontSize="100%" tts:fontStyle="italic" tts:fontWeight="normal" xml:id="style2"/>
+</styling>
+<layout>
+<region tts:displayAlign="after" xml:id="region0"/>
+</layout>
+</head>
+<body>
+<div xml:space="preserve">
+    <p xml:id="p1" begin="1374000000t" end="1404000000t" region="bottomCenter">Senator, we&#039;re making<br/>our final approach into Coruscant.</p>
+    <p xml:id="p2" begin="37405000000t" end="37425000000t" region="bottomCenter">Very good, Lieutenant.</p>
+  </div>
+  </body>
+</tt>
