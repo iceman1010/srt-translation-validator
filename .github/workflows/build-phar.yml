@@ -1,0 +1,129 @@
+name: Build PHAR & Create Release
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    name: Tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: [ '8.1', '8.2', '8.3' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run PHPUnit (self-contained CLI tests always run; example-based tests skip if fixtures absent)
+        run: vendor/bin/phpunit tests/
+
+  build-phar:
+    name: Build PHAR & Release
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+          coverage: none
+
+      - name: Install production dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Get version from VERSION file
+        id: version
+        run: |
+          VERSION=$(cat VERSION | tr -d ' \t\n\r')
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version detected: $VERSION"
+
+      - name: Build PHAR
+        run: php -d phar.readonly=0 build/build-phar.php
+
+      - name: Verify PHAR version
+        run: php build/srt-translation-validator.phar --version
+
+      - name: Verify PHAR integrity
+        run: php -r '$p = new Phar("build/srt-translation-validator.phar"); echo "Signature: " . $p->getSignature()["hash_type"] . "\n";'
+
+      - name: Create fixtures
+        run: |
+          mkdir -p /tmp/srtci
+          printf '1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n2\n00:00:04,000 --> 00:00:06,000\nSecond caption here\n\n' > /tmp/srtci/original.srt
+          printf '1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\n2\n00:00:04,000 --> 00:00:06,000\nZweite Zeile hier\n\n' > /tmp/srtci/translated.srt
+          printf '1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\n' > /tmp/srtci/missing-caption.srt
+          printf '1\n00:00:01,000 --> 00:00:03,000\nBROKEN --> BROKEN\n\n' > /tmp/srtci/invalid-format.srt
+
+      - name: Smoke test (valid translation -> exit 0)
+        run: |
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/translated.srt -l en
+          [ $? -eq 0 ]
+
+      - name: Smoke test (missing caption -> exit 1)
+        run: |
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/missing-caption.srt -l en >/dev/null
+          [ $? -eq 1 ]
+
+      - name: Smoke test (malformed format -> exit 1)
+        run: |
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/invalid-format.srt -l en >/dev/null
+          [ $? -eq 1 ]
+
+      - name: Create Release & Upload PHAR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: srt-translation-validator v${{ steps.version.outputs.VERSION }}
+          body: |
+            srt-translation-validator v${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+            Download the `srt-translation-validator.phar` file and make it executable:
+            ```bash
+            chmod +x srt-translation-validator.phar
+            sudo mv srt-translation-validator.phar /usr/local/bin/srt-translation-validator
+            ```
+
+            ### Usage
+            ```bash
+            srt-translation-validator original.srt translation.srt --lang=de
+            ```
+
+            ### How to bump the version
+            Edit the `VERSION` file (e.g. `1.0.0` -> `1.0.1`) and push to `main`.
+            The workflow rebuilds the PHAR and creates/updates this release.
+
+            ### Changes
+            See commit history: https://github.com/${{ github.repository }}/commits/main
+          files: build/srt-translation-validator.phar
+          draft: false
+          prerelease: false
+
+      - name: Upload PHAR as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: srt-translation-validator.phar
+          path: build/srt-translation-validator.phar

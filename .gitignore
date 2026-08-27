@@ -1,4 +1,6 @@
-
 # Local example fixtures
 /examples/*.srt
 /docs/
+
+# Built PHAR archive
+/build/*.phar

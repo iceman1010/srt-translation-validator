@@ -12,6 +12,13 @@ class SrtTranslationValidatorTest extends TestCase
     {
         $this->validator = new SrtTranslationValidator();
         $this->examplesDir = __DIR__ . '/../examples/';
+
+        // The Matrix example files are local-only fixtures (see .gitignore);
+        // these integration tests are skipped when they are not checked out.
+        if (!is_file($this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt')
+            || !is_file($this->examplesDir . 'The.Matrix.1999.Tubi.CC.de.srt')) {
+            $this->markTestSkipped('Local example fixtures are not present');
+        }
     }
 
     public function testValidTranslation()
