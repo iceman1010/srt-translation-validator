@@ -1,0 +1,33 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+if (PHP_SAPI !== 'cli') {
+    fwrite(STDERR, "srt-validator may only be run from the command line.\n");
+    exit(2);
+}
+
+$autoloadCandidates = [
+    __DIR__ . '/../vendor/autoload.php',       // project checkout, or inside a PHAR
+    __DIR__ . '/../../../vendor/autoload.php', // installed as a composer dependency
+];
+
+$loaded = false;
+foreach ($autoloadCandidates as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        $loaded = true;
+        break;
+    }
+}
+
+if (!$loaded) {
+    fwrite(STDERR, "Unable to find the Composer autoloader. Run 'composer install' first.\n");
+    exit(2);
+}
+
+$versionFile = __DIR__ . '/../VERSION';
+define('SRT_VALIDATOR_VERSION', trim(file_exists($versionFile) ? file_get_contents($versionFile) : 'dev'));
+
+exit(\SrtValidator\Cli::run($_SERVER['argv'] ?? $argv));

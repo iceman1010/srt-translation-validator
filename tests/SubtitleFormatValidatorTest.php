@@ -473,6 +473,9 @@ VTT;
     {
         $dir = __DIR__ . '/../examples/';
         foreach (['The.Matrix.1999.Tubi.CC.en.srt', 'The.Matrix.1999.Tubi.CC.de.srt'] as $file) {
+            if (!is_file($dir . $file)) {
+                $this->markTestSkipped("Local example fixture {$file} is not present");
+            }
             $result = $this->validator->validateFile($dir . $file);
             $this->assertTrue($result['valid'], "{$file} should be structurally valid: " . json_encode($result['errors']));
             $this->assertSame('srt', $result['format']);
@@ -483,6 +486,9 @@ VTT;
     public function testFormatVariantFilesOnDisk(): void
     {
         $dir = __DIR__ . '/../examples/';
+        if (!is_file($dir . 'The.Matrix.1999.Tubi.CC.de.srt')) {
+            $this->markTestSkipped('Local example fixtures are not present');
+        }
         foreach (['defect_missing_parts.de.srt', 'defect_timestamp_mismatch.de.srt', 'defect_partial_translation.de.srt'] as $file) {
             $result = $this->validator->validateFile($dir . $file);
             $this->assertTrue($result['valid'], "{$file} should be structurally valid: " . json_encode($result['errors']));

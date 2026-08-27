@@ -1,5 +1,7 @@
 {
     "name": "srt/translation-validator",
+    "description": "Validates subtitle translations: DETECTS missing captions, partial translation, timestamp mismatch, and invalid SRT/WebVTT format",
+    "keywords": ["subtitles", "srt", "webvtt", "translation", "validator"],
     "require": {
         "php": "^7.4|^8.0",
         "mantas-done/subtitles": "^1.0",
@@ -10,7 +12,14 @@
             "SrtValidator\\": "src/"
         }
     },
+    "bin": [
+        "bin/srt-validator"
+    ],
     "require-dev": {
         "phpunit/phpunit": "^9.5"
+    },
+    "scripts": {
+        "test": "phpunit tests/",
+        "build-phar": "@php -d phar.readonly=0 build/build-phar.php"
     }
 }
