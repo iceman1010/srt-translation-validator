@@ -81,8 +81,6 @@ class SrtTranslationValidatorTest extends TestCase
 
     public function testPartialTranslationDefect()
     {
-        $this->markTestSkipped('Partial translation detection not working with current language library. See docs/ToDo-Install-FastText.md');
-
         $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
         $translationPath = $this->examplesDir . 'defect_partial_translation.de.srt';
 
@@ -111,8 +109,6 @@ class SrtTranslationValidatorTest extends TestCase
 
     public function testInvalidFormatDefect()
     {
-        $this->markTestSkipped('Invalid format detection not working - parser too tolerant. Current parser handles malformed input gracefully.');
-
         $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
         $translationPath = $this->examplesDir . 'defect_invalid_format.de.srt';
 
@@ -125,5 +121,13 @@ class SrtTranslationValidatorTest extends TestCase
         });
 
         $this->assertNotEmpty($invalidFormatDefects, 'Should detect invalid format defects');
+
+        $subtypes = array_map(function($defect) {
+            return $defect['subtype'] ?? 'unknown';
+        }, $invalidFormatDefects);
+
+        $this->assertContains('missing_timestamp', $subtypes, 'Should detect a missing/expected timestamp line');
+        $this->assertContains('malformed_timestamp', $subtypes, 'Should detect a malformed timestamp line');
+        $this->assertSame(['missing_timestamp', 'missing_timestamp', 'missing_timestamp', 'malformed_timestamp', 'malformed_timestamp'], $subtypes, 'Should pinpoint each individual format error');
     }
 }
