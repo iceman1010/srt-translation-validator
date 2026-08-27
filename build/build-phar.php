@@ -77,14 +77,15 @@ if (is_file($root . '/VERSION')) {
 }
 
 // The GitHub repository this project is released from ("owner/repo"). Needed by
-// the --update self-update feature. Auto-detected from the git remote, with a
-// fallback for offline builds.
-$releaseRepo = 'iceman1010/srt-translation-validator';
+// the --update self-update feature. Auto-detected from the git remote.
+$releaseRepo = null;
 $gitUrl = @shell_exec('git -C ' . escapeshellarg($root) . ' remote get-url origin 2>/dev/null');
 if (is_string($gitUrl) && trim($gitUrl) !== '') {
     $url = trim($gitUrl);
     if (strpos($url, 'git@') === 0) {
         $url = preg_replace('#^git@[^:]+:#', '', $url);
+    } elseif (strpos($url, 'ssh://') === 0) {
+        $url = preg_replace('#^ssh://[^@/]+@[^/]+/#', '', $url);
     } else {
         $url = preg_replace('#^https?://[^/]+/#', '', $url);
     }
@@ -93,6 +94,12 @@ if (is_string($gitUrl) && trim($gitUrl) !== '') {
     if (strpos($url, '/') !== false) {
         $releaseRepo = $url;
     }
+}
+
+if ($releaseRepo === null) {
+    $releaseRepo = 'iceman1010/srt-translation-validator';
+    fwrite(STDERR, "Warning: no 'origin' git remote found; --update will point at {$releaseRepo}.\n");
+    fwrite(STDERR, "         Set the origin remote (or override the fallback in " . basename(__FILE__) . ") before releasing.\n");
 }
 
 $stub = <<<PHP
