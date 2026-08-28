@@ -3,7 +3,7 @@
         'name' => 'srt/translation-validator',
         'pretty_version' => 'dev-main',
         'version' => 'dev-main',
-        'reference' => 'f32af911748b39961382820ddc25d93938c388aa',
+        'reference' => 'f07415414cd06140de9f5f8f0fe57ed8a6c57381',
         'type' => 'library',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -274,7 +274,7 @@
         'srt/translation-validator' => array(
             'pretty_version' => 'dev-main',
             'version' => 'dev-main',
-            'reference' => 'f32af911748b39961382820ddc25d93938c388aa',
+            'reference' => 'f07415414cd06140de9f5f8f0fe57ed8a6c57381',
             'type' => 'library',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),
