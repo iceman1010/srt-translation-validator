@@ -104,11 +104,29 @@ jobs:
           body: |
             srt-translation-validator v${{ needs.check-version.outputs.version }}
 
+            ### Download
+
+            ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/srt-translation-validator.phar
+            ```
+
             ### Installation
-            Download the `srt-translation-validator.phar` file and make it executable:
+
+            **System-wide** (available to all users):
+            ```bash
+            sudo chmod +x srt-translation-validator.phar
+            sudo mv srt-translation-validator.phar /usr/local/bin/srt-translation-validator
+            ```
+
+            **Local user only** (no root required):
             ```bash
             chmod +x srt-translation-validator.phar
-            sudo mv srt-translation-validator.phar /usr/local/bin/srt-translation-validator
+            mkdir -p ~/.local/bin
+            mv srt-translation-validator.phar ~/.local/bin/srt-translation-validator
+            ```
+            Make sure `~/.local/bin` is in your `$PATH` (add to `~/.bashrc` or `~/.zshrc` if needed):
+            ```bash
+            export PATH="$HOME/.local/bin:$PATH"
             ```
 
             ### Usage
