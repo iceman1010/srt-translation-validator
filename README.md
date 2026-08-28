@@ -343,12 +343,13 @@ e.g. `1.0.0`). The release process:
 1. Bump `VERSION` (patch for fixes, minor for features).
 2. Commit the bump **together with** the change, and push to `main`.
 3. A GitHub Actions workflow (`.github/workflows/build-phar.yml`) runs the
-   tests on PHP 8.1/8.2/8.3, builds the PHAR, verifies it, and creates/updates
+   tests on PHP 8.1/8.2/8.3 and, **only when `VERSION` changed** compared to
+   the latest released tag, builds the PHAR, verifies it, and creates/updates
    the GitHub **Release** `v<VERSION>` with the PHAR attached.
 
-If you push a change without bumping `VERSION`, the workflow still builds and
-tests, and the existing release is updated in place. Users on the old PHAR can
-then run `--update`.
+If you push a change without bumping `VERSION`, only the tests run — no PHAR
+is built and no release is touched. (Via "Run workflow" in the Actions tab you
+can force a rebuild of the current version at any time.)
 
 ## Project layout
 
