@@ -11,6 +11,33 @@ permissions:
   contents: write
 
 jobs:
+  check-version:
+    name: Check version change
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.VERSION }}
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare VERSION against latest release tag
+        id: check
+        run: |
+          git fetch --tags --force
+          VERSION=$(tr -d ' \t\n\r' < VERSION)
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "v$VERSION" = "$LATEST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION unchanged (latest tag: ${LATEST:-none}) - skipping PHAR build."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed: ${LATEST:-none} -> v$VERSION - PHAR will be built and released."
+          fi
+
   tests:
     name: Tests (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
@@ -36,7 +63,13 @@ jobs:
 
   build-phar:
     name: Build PHAR & Release
-    needs: tests
+    needs: [check-version, tests]
+    # Only build when VERSION moved past the latest released tag.
+    # workflow_dispatch is the explicit force-rebuild escape hatch.
+    if: >-
+      (github.event_name != 'pull_request'
+        && needs.check-version.outputs.changed == 'true')
+      || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -52,13 +85,6 @@ jobs:
       - name: Install production dependencies
         run: composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
 
-      - name: Get version from VERSION file
-        id: version
-        run: |
-          VERSION=$(cat VERSION | tr -d ' \t\n\r')
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Version detected: $VERSION"
-
       - name: Build PHAR
         run: php -d phar.readonly=0 build/build-phar.php
 
@@ -70,13 +96,13 @@ jobs:
           php -r '$p = new Phar("build/srt-translation-validator.phar"); echo "Signature: " . $p->getSignature()["hash_type"] . "\n";'
 
       - name: Create Release & Upload PHAR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          name: srt-translation-validator v${{ steps.version.outputs.VERSION }}
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: srt-translation-validator v${{ needs.check-version.outputs.version }}
           body: |
-            srt-translation-validator v${{ steps.version.outputs.VERSION }}
+            srt-translation-validator v${{ needs.check-version.outputs.version }}
 
             ### Installation
             Download the `srt-translation-validator.phar` file and make it executable:

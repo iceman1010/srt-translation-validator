@@ -27,9 +27,11 @@
   forget, the update process breaks.
 
 ### Release Flow
-- Pushing to `main` triggers `.github/workflows/build-phar.yml`, which runs the
-  tests, builds the PHAR and creates/updates the GitHub Release named
-  `v<VERSION>` (see README "Releasing a new version").
+- Pushing to `main` runs the tests. The PHAR is built and the GitHub Release
+  `v<VERSION>` created/updated **only when the `VERSION` file changed**
+  compared to the latest released tag (see README "Releasing a new version").
+- `workflow_dispatch` (Actions tab, "Run workflow") force-rebuilds the current
+  version.
 
 ### Making Changes
 - Ask before making assumptions about scope. When in doubt, ask.
