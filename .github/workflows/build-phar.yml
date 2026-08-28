@@ -72,24 +72,24 @@ jobs:
       - name: Create fixtures
         run: |
           mkdir -p /tmp/srtci
-          printf '1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n2\n00:00:04,000 --> 00:00:06,000\nSecond caption here\n\n' > /tmp/srtci/original.srt
-          printf '1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\n2\n00:00:04,000 --> 00:00:06,000\nZweite Zeile hier\n\n' > /tmp/srtci/translated.srt
-          printf '1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\n' > /tmp/srtci/missing-caption.srt
+          for i in $(seq 1 25); do s=$((i*2)); e=$((s+2)); printf '%d\n00:00:%02d,000 --> 00:00:%02d,000\nEnglish movie line number %d.\n\n' "$i" "$s" "$e" "$i"; done > /tmp/srtci/original.srt
+          for i in $(seq 1 25); do s=$((i*2)); e=$((s+2)); printf '%d\n00:00:%02d,000 --> 00:00:%02d,000\nDeutsche Filmzeile Nummer %d.\n\n' "$i" "$s" "$e" "$i"; done > /tmp/srtci/translated.srt
+          for i in $(seq 1 25); do if [ "$i" -eq 15 ]; then continue; fi; s=$((i*2)); e=$((s+2)); printf '%d\n00:00:%02d,000 --> 00:00:%02d,000\nDeutsche Filmzeile Nummer %d.\n\n' "$i" "$s" "$e" "$i"; done > /tmp/srtci/missing-caption.srt
           printf '1\n00:00:01,000 --> 00:00:03,000\nBROKEN --> BROKEN\n\n' > /tmp/srtci/invalid-format.srt
 
       - name: Smoke test (valid translation -> exit 0)
         run: |
-          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/translated.srt -l en
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/translated.srt -l de
           [ $? -eq 0 ]
 
       - name: Smoke test (missing caption -> exit 1)
         run: |
-          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/missing-caption.srt -l en >/dev/null
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/missing-caption.srt -l de >/dev/null
           [ $? -eq 1 ]
 
       - name: Smoke test (malformed format -> exit 1)
         run: |
-          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/invalid-format.srt -l en >/dev/null
+          php build/srt-translation-validator.phar /tmp/srtci/original.srt /tmp/srtci/invalid-format.srt -l de >/dev/null
           [ $? -eq 1 ]
 
       - name: Create Release & Upload PHAR
