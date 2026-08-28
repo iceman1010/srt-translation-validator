@@ -66,7 +66,8 @@ jobs:
         run: php build/srt-translation-validator.phar --version
 
       - name: Verify PHAR integrity
-        run: php -r '$p = new Phar("build/srt-translation-validator.phar"); echo "Signature: " . $p->getSignature()["hash_type"] . "\n";'
+        run: |
+          php -r '$p = new Phar("build/srt-translation-validator.phar"); echo "Signature: " . $p->getSignature()["hash_type"] . "\n";'
 
       - name: Create fixtures
         run: |
