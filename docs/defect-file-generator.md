@@ -12,7 +12,7 @@ Create realistic defect test files that:
 ## Usage
 
 ```bash
-php create_defect_files.php
+php scripts/create_defect_files.php
 ```
 
 ## How It Works

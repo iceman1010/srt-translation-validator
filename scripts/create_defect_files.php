@@ -1,12 +1,13 @@
 <?php
 
-require 'vendor/autoload.php';
+$root = dirname(__DIR__);
+require $root . '/vendor/autoload.php';
 
 echo "Creating proper defect files using subtitle library...\n";
 
 // Load original files
-$originalEn = Done\Subtitles\Subtitles::loadFromFile('examples/The.Matrix.1999.Tubi.CC.en.srt');
-$originalDe = Done\Subtitles\Subtitles::loadFromFile('examples/The.Matrix.1999.Tubi.CC.de.srt');
+$originalEn = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/The.Matrix.1999.Tubi.CC.en.srt');
+$originalDe = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/The.Matrix.1999.Tubi.CC.de.srt');
 
 $enBlocks = $originalEn->getInternalFormat();
 $deBlocks = $originalDe->getInternalFormat();
@@ -29,7 +30,7 @@ for ($i = 900; $i < $totalCaptions && $i < count($partialBlocks); $i++) {
 }
 
 $partialDe->setInternalFormat($partialBlocks);
-$partialDe->save('examples/defect_partial_translation.de.srt');
+$partialDe->save($root . '/examples/defect_partial_translation.de.srt');
 echo "Created defect_partial_translation.de.srt - captions 900-$totalCaptions in English (about 934 captions)\n";
 
 // ============================================
@@ -47,7 +48,7 @@ $missingBlocks = array_merge(
 );
 
 $missingDe->setInternalFormat($missingBlocks);
-$missingDe->save('examples/defect_missing_parts.de.srt');
+$missingDe->save($root . '/examples/defect_missing_parts.de.srt');
 echo "Created defect_missing_parts.de.srt with " . count($missingBlocks) . " captions (removed 6 from middle)\n";
 
 // ============================================
@@ -65,7 +66,7 @@ for ($i = 300; $i < 320 && $i < count($timestampBlocks); $i++) {
 }
 
 $timestampDe->setInternalFormat($timestampBlocks);
-$timestampDe->save('examples/defect_timestamp_mismatch.de.srt');
+$timestampDe->save($root . '/examples/defect_timestamp_mismatch.de.srt');
 echo "Created defect_timestamp_mismatch.de.srt with timestamps shifted for captions 300-319\n";
 
 // ============================================
@@ -131,20 +132,20 @@ for ($i = 0; $i < count($deBlocks); $i++) {
     }
 }
 
-file_put_contents('examples/defect_invalid_format.de.srt', implode("\n", $invalidContent));
+file_put_contents($root . '/examples/defect_invalid_format.de.srt', implode("\n", $invalidContent));
 echo "Created defect_invalid_format.de.srt with format errors at captions 500, 800, 1200, 1500\n";
 
 echo "\nAll defect files created successfully!\n";
 
 // Quick verification
 echo "\nVerification:\n";
-$p = Done\Subtitles\Subtitles::loadFromFile('examples/defect_partial_translation.de.srt');
+$p = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_partial_translation.de.srt');
 echo "Partial translation: " . count($p->getInternalFormat()) . " captions (first 900 German, rest English)\n";
 
-$m = Done\Subtitles\Subtitles::loadFromFile('examples/defect_missing_parts.de.srt');
+$m = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_missing_parts.de.srt');
 echo "Missing parts: " . count($m->getInternalFormat()) . " captions (6 removed)\n";
 
-$t = Done\Subtitles\Subtitles::loadFromFile('examples/defect_timestamp_mismatch.de.srt');
+$t = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_timestamp_mismatch.de.srt');
 echo "Timestamp mismatch: " . count($t->getInternalFormat()) . " captions (20 shifted by +2s)\n";
 
 // Check first few captions of partial translation to verify

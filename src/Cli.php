@@ -26,13 +26,7 @@ final class Cli
         $options = self::parseOptions(array_slice($argv, 1));
 
         if ($options === null) {
-            if (in_array('--json', array_slice($argv, 1), true)) {
-                echo self::encodeJson(['error' => 'unknown option or missing option value']);
-            } else {
-                self::stderr("Error: unknown option or missing option value.\n\n");
-                self::stderr(self::usage());
-            }
-            return self::EXIT_ERROR;
+            return self::fail('unknown option or missing option value', in_array('--json', array_slice($argv, 1), true), true);
         }
 
         $json = $options['json'];
@@ -53,56 +47,52 @@ final class Cli
 
         $files = $options['files'];
         if (count($files) !== 2) {
-            if ($json) {
-                echo self::encodeJson(['error' => sprintf('expected exactly two subtitle files, got %d', count($files))]);
-            } else {
-                self::stderr(sprintf("Error: expected exactly two subtitle files, got %d.\n\n", count($files)));
-                self::stderr(self::usage());
-            }
-            return self::EXIT_ERROR;
+            return self::fail(sprintf('expected exactly two subtitle files, got %d', count($files)), $json, true);
         }
 
         [$original, $translation] = $files;
 
         foreach ([$original, $translation] as $path) {
             if (!is_file($path) || !is_readable($path)) {
-                if ($json) {
-                    echo self::encodeJson(['error' => 'file does not exist or is not readable: ' . $path]);
-                } else {
-                    self::stderr(sprintf("Error: file does not exist or is not readable: %s\n", $path));
-                }
-                return self::EXIT_ERROR;
+                return self::fail('file does not exist or is not readable: ' . $path, $json);
             }
         }
 
-        $lang = $options['lang'];
+        $detector = self::createLanguageDetector();
+
+        $lang = $options['lang'] ?? self::autoDetectLanguage($translation, $detector);
         if ($lang === null) {
-            $lang = self::autoDetectLanguage($translation);
-            if ($lang === null) {
-                if ($json) {
-                    echo self::encodeJson(['error' => 'could not auto-detect the language of the translation; pass the expected language with --lang']);
-                } else {
-                    self::stderr(sprintf(
-                        "Error: could not auto-detect the language of '%s'. Pass the expected language with --lang.\n",
-                        $translation
-                    ));
-                }
-                return self::EXIT_ERROR;
-            }
+            return self::fail("could not auto-detect the language of '{$translation}'. Pass the expected language with --lang", $json);
         }
 
-        $validator = new SrtTranslationValidator();
+        $validator = new SrtTranslationValidator($detector);
         $validator->setTimestampTolerance($options['tolerance']);
 
         $result = $validator->validate($original, $translation, $lang);
 
-        if ($json) {
-            echo self::renderJson($original, $translation, $lang, $options['tolerance'], $result);
-        } else {
-            echo self::renderReport($original, $translation, $lang, $options['tolerance'], $result);
-        }
+        echo $json
+            ? self::renderJson($original, $translation, $lang, $options['tolerance'], $result)
+            : self::renderReport($original, $translation, $lang, $options['tolerance'], $result);
 
         return $result['valid'] ? self::EXIT_OK : self::EXIT_DEFECTS;
+    }
+
+    /**
+     * Reports a usage or environment error as JSON (machine mode) or as a
+     * human-readable stderr message, and returns the error exit code.
+     */
+    private static function fail(string $message, bool $json, bool $showUsage = false): int
+    {
+        if ($json) {
+            echo self::encodeJson(['error' => $message]);
+            return self::EXIT_ERROR;
+        }
+
+        self::stderr("Error: {$message}.\n");
+        if ($showUsage) {
+            self::stderr("\n" . self::usage());
+        }
+        return self::EXIT_ERROR;
     }
 
     public static function versionString(): string
@@ -235,7 +225,7 @@ final class Cli
 
     public static function usage(): string
     {
-        $executable = implode(' ', [basename($_SERVER['argv'][0] ?? 'srt-validator')]);
+        $executable = basename($_SERVER['argv'][0] ?? 'srt-validator');
         return <<<TXT
 Subtitle Translation Validator
 Compares an original subtitle file against a translation and reports defects.
@@ -283,9 +273,21 @@ TXT;
             'files' => [],
         ];
 
-        $count = count($args);
+        // Normalize "--opt=value" into "--opt" + "value" so every option is
+        // handled as one flag-with-value pattern.
+        $normalized = [];
+        foreach ($args as $arg) {
+            if (strpos($arg, '--') === 0 && strpos($arg, '=') !== false) {
+                $normalized[] = substr($arg, 0, (int)strpos($arg, '='));
+                $normalized[] = substr($arg, (int)strpos($arg, '=') + 1);
+            } else {
+                $normalized[] = $arg;
+            }
+        }
+
+        $count = count($normalized);
         for ($i = 0; $i < $count; $i++) {
-            $arg = $args[$i];
+            $arg = $normalized[$i];
 
             if ($arg === '--help' || $arg === '-h') {
                 $options['help'] = true;
@@ -297,30 +299,26 @@ TXT;
                 continue;
             }
 
-            if ($arg === '--update') {
-                $options['update'] = '';
-                continue;
-            }
-            if (strpos($arg, '--update=') === 0) {
-                $options['update'] = substr($arg, 9);
-                continue;
-            }
-
             if ($arg === '--json' || $arg === '-j') {
                 $options['json'] = true;
                 continue;
             }
 
-            if ($arg === '--lang' || $arg === '-l') {
-                $value = $args[++$i] ?? null;
-                if ($value === null || $value === '') {
-                    return null;
+            if ($arg === '--update') {
+                // An optional version may follow; only consume it when it
+                // looks like one, so filenames are never eaten.
+                $next = $normalized[$i + 1] ?? null;
+                if ($next !== null && preg_match('/^v?\d+(\.\d+)*$/', $next)) {
+                    $options['update'] = ltrim($next, 'v');
+                    $i++;
+                } else {
+                    $options['update'] = '';
                 }
-                $options['lang'] = strtolower($value);
                 continue;
             }
-            if (strpos($arg, '--lang=') === 0) {
-                $value = substr($arg, 7);
+
+            if ($arg === '--lang' || $arg === '-l') {
+                $value = $normalized[++$i] ?? '';
                 if ($value === '') {
                     return null;
                 }
@@ -329,15 +327,7 @@ TXT;
             }
 
             if ($arg === '--tolerance' || $arg === '-t') {
-                $value = $args[++$i] ?? null;
-                if ($value === null || !is_numeric($value) || (float)$value < 0) {
-                    return null;
-                }
-                $options['tolerance'] = (float)$value;
-                continue;
-            }
-            if (strpos($arg, '--tolerance=') === 0) {
-                $value = substr($arg, 12);
+                $value = $normalized[++$i] ?? '';
                 if (!is_numeric($value) || (float)$value < 0) {
                     return null;
                 }
@@ -359,8 +349,12 @@ TXT;
      * Detects the dominant language of a subtitle file so the CLI can be used
      * without an explicit --lang.
      */
-    private static function autoDetectLanguage(string $translationPath): ?string
+    private static function autoDetectLanguage(string $translationPath, ?Language $detector): ?string
     {
+        if ($detector === null) {
+            return null;
+        }
+
         try {
             $subtitles = Subtitles::loadFromFile($translationPath);
         } catch (\Throwable $e) {
@@ -391,10 +385,6 @@ TXT;
         }
 
         try {
-            $detector = self::createLanguageDetector();
-            if ($detector === null) {
-                return null;
-            }
             $result = $detector->detect($sample)->close();
         } catch (\Throwable $e) {
             return null;

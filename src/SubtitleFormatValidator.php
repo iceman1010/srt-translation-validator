@@ -25,7 +25,7 @@ namespace SrtValidator;
  *   - NOTE comment blocks, STYLE and REGION blocks
  *   - negative timestamps (used for pre-roll content by some tools)
  */
-class SubtitleFormatValidator
+final class SubtitleFormatValidator
 {
     public const FORMAT_SRT = 'srt';
     public const FORMAT_VTT = 'vtt';
