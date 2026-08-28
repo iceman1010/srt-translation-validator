@@ -11,10 +11,12 @@
   `--update` self-update mechanism in sync.
 
 ### Commit and Push
-- NEVER commit or push without the user's **explicit approval**.
-- Always ask before committing and pushing. Example: "Ready to commit and push?"
-- When the user says "commit and push" or gives clear approval, proceed
-  immediately.
+- NEVER commit or push on your own initiative.
+- NEVER ask the user about committing or pushing (no "Ready to commit?"
+  prompts, no reminders, no offers).
+- The ONLY way committing and pushing happens is if the user explicitly asks
+  for it (e.g. "commit and push").
+- When the user explicitly asks, proceed immediately.
 - NEVER forget to bump `VERSION` before committing. If you forget, the update
   process breaks.
 

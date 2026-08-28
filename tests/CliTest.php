@@ -150,4 +150,51 @@ class CliTest extends TestCase
         $this->assertSame(0, $exit, $output);
         $this->assertStringContainsString('Timestamp tolerance: 0.1s', $output);
     }
+
+    public function testJsonValidOutput(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de', '--json']);
+        $this->assertSame(0, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertIsArray($data, $output);
+        $this->assertTrue($data['valid']);
+        $this->assertSame('passed', $data['result']);
+        $this->assertSame('de', $data['language']);
+        $this->assertSame(0, $data['defect_count']);
+        $this->assertSame([], $data['defects']);
+        $this->assertSame([], $data['defects_by_type']);
+    }
+
+    public function testJsonDefectsOutput(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['missing'], '-l', 'de', '--json']);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertIsArray($data, $output);
+        $this->assertFalse($data['valid']);
+        $this->assertSame('failed', $data['result']);
+        $this->assertGreaterThan(0, $data['defect_count']);
+        $this->assertSame(count($data['defects']), $data['defect_count']);
+
+        $counted = [];
+        foreach ($data['defects'] as $defect) {
+            $this->assertNotEmpty($defect['type']);
+            $this->assertNotEmpty($defect['message']);
+            $counted[$defect['type']] = ($counted[$defect['type']] ?? 0) + 1;
+        }
+        $this->assertEquals($counted, $data['defects_by_type']);
+    }
+
+    public function testJsonErrorOutput(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->tmp . '/nope.srt', '-l', 'de', '--json']);
+        $this->assertSame(2, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertIsArray($data, $output);
+        $this->assertArrayHasKey('error', $data);
+        $this->assertStringContainsString('does not exist or is not readable', $data['error']);
+    }
 }

@@ -58,6 +58,7 @@ compares them, and prints a human-readable report.
 | ---------------------- | ------------------------------------------------------------------------ |
 | `-l, --lang=CODE`      | Expected language of the translation (ISO 639-1, e.g. `de`). Default: auto-detected from the translation text. |
 | `-t, --tolerance=SEC`  | Timestamp drift tolerance in seconds (default: `0.5`).                   |
+| `-j, --json`           | Print the report as JSON (for scripts, agents and LLMs). Exit codes are unchanged. |
 | `-h, --help`           | Show usage help.                                                         |
 | `-V, --version`        | Print the version and exit.                                              |
 | `--update[=version]`   | Update the tool to the latest release (or a specific version, e.g. `--update=1.0.1`). |
@@ -81,6 +82,43 @@ srt-translation-validator original.srt translation.srt -l de
 
 # Stricter timestamp tolerance (100 ms)
 srt-translation-validator -t 0.1 -l de Movie.en.srt Movie.pt.srt
+
+# Machine-readable output for scripts, agents and LLMs
+srt-translation-validator original.srt translation.srt -l de --json
+```
+
+### JSON output
+
+With `--json` the report is printed as a single JSON object on stdout (nothing
+else is written, so it is safe to pipe into `jq` or parse directly). Errors are
+reported as `{"error": "..."}` with exit code `2`.
+
+```json
+{
+    "valid": false,
+    "result": "failed",
+    "original": "original.srt",
+    "translation": "translation.srt",
+    "language": "de",
+    "timestamp_tolerance": 0.5,
+    "defect_count": 2,
+    "defects_by_type": {
+        "missing_caption": 1,
+        "missing_parts": 1
+    },
+    "defects": [
+        {
+            "type": "missing_parts",
+            "message": "Translation has 24 captions, original has 25. Missing 1 captions."
+        },
+        {
+            "type": "missing_caption",
+            "message": "Caption #25 is missing in translation",
+            "caption_number": 25,
+            "original_text": "English movie line number 25."
+        }
+    ]
+}
 ```
 
 ### Example report
