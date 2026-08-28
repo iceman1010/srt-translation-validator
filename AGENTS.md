@@ -10,15 +10,21 @@
   in the commit. This keeps the GitHub release (`v<VERSION>`) and the PHAR
   `--update` self-update mechanism in sync.
 
-### Commit and Push
-- NEVER commit or push on your own initiative.
-- NEVER ask the user about committing or pushing (no "Ready to commit?"
+### Git
+- NEVER run any git command that changes state: add, rm, mv, restore,
+  reset, checkout, stash, commit, push, tag — none of them. This includes
+  index/staging operations.
+- Staging, committing and pushing are done exclusively by the user.
+- NEVER ask the user about committing and pushing (no "Ready to commit?"
   prompts, no reminders, no offers).
 - The ONLY way committing and pushing happens is if the user explicitly asks
   for it (e.g. "commit and push").
-- When the user explicitly asks, proceed immediately.
-- NEVER forget to bump `VERSION` before committing. If you forget, the update
-  process breaks.
+- Read-only commands (status, diff, log, ls-files) are allowed when needed
+  for inspection.
+- Move or rename files with plain filesystem commands (`mv`), never with
+  `git mv`.
+- NEVER forget to bump `VERSION` when the user asks for a commit. If you
+  forget, the update process breaks.
 
 ### Release Flow
 - Pushing to `main` triggers `.github/workflows/build-phar.yml`, which runs the

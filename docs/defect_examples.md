@@ -2,7 +2,7 @@
 
 ## Current Status
 
-All defect files have been created using the automated tool (`create_defect_files.php`).
+All defect files have been created using the automated tool (`scripts/create_defect_files.php`).
 
 ## Generated Defect Files
 
