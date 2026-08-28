@@ -26,10 +26,16 @@ final class Cli
         $options = self::parseOptions(array_slice($argv, 1));
 
         if ($options === null) {
-            self::stderr("Error: unknown option or missing option value.\n\n");
-            self::stderr(self::usage());
+            if (in_array('--json', array_slice($argv, 1), true)) {
+                echo self::encodeJson(['error' => 'unknown option or missing option value']);
+            } else {
+                self::stderr("Error: unknown option or missing option value.\n\n");
+                self::stderr(self::usage());
+            }
             return self::EXIT_ERROR;
         }
+
+        $json = $options['json'];
 
         if ($options['help']) {
             echo self::usage();
@@ -47,8 +53,12 @@ final class Cli
 
         $files = $options['files'];
         if (count($files) !== 2) {
-            self::stderr(sprintf("Error: expected exactly two subtitle files, got %d.\n\n", count($files)));
-            self::stderr(self::usage());
+            if ($json) {
+                echo self::encodeJson(['error' => sprintf('expected exactly two subtitle files, got %d', count($files))]);
+            } else {
+                self::stderr(sprintf("Error: expected exactly two subtitle files, got %d.\n\n", count($files)));
+                self::stderr(self::usage());
+            }
             return self::EXIT_ERROR;
         }
 
@@ -56,7 +66,11 @@ final class Cli
 
         foreach ([$original, $translation] as $path) {
             if (!is_file($path) || !is_readable($path)) {
-                self::stderr(sprintf("Error: file does not exist or is not readable: %s\n", $path));
+                if ($json) {
+                    echo self::encodeJson(['error' => 'file does not exist or is not readable: ' . $path]);
+                } else {
+                    self::stderr(sprintf("Error: file does not exist or is not readable: %s\n", $path));
+                }
                 return self::EXIT_ERROR;
             }
         }
@@ -65,10 +79,14 @@ final class Cli
         if ($lang === null) {
             $lang = self::autoDetectLanguage($translation);
             if ($lang === null) {
-                self::stderr(sprintf(
-                    "Error: could not auto-detect the language of '%s'. Pass the expected language with --lang.\n",
-                    $translation
-                ));
+                if ($json) {
+                    echo self::encodeJson(['error' => 'could not auto-detect the language of the translation; pass the expected language with --lang']);
+                } else {
+                    self::stderr(sprintf(
+                        "Error: could not auto-detect the language of '%s'. Pass the expected language with --lang.\n",
+                        $translation
+                    ));
+                }
                 return self::EXIT_ERROR;
             }
         }
@@ -78,7 +96,11 @@ final class Cli
 
         $result = $validator->validate($original, $translation, $lang);
 
-        echo self::renderReport($original, $translation, $lang, $options['tolerance'], $result);
+        if ($json) {
+            echo self::renderJson($original, $translation, $lang, $options['tolerance'], $result);
+        } else {
+            echo self::renderReport($original, $translation, $lang, $options['tolerance'], $result);
+        }
 
         return $result['valid'] ? self::EXIT_OK : self::EXIT_DEFECTS;
     }
@@ -229,6 +251,8 @@ OPTIONS:
   -l, --lang=CODE     Expected language of the translation (ISO 639-1, e.g. de).
                       Default: auto-detected from the translation text.
   -t, --tolerance=SEC Timestamp drift tolerance in seconds (default: 0.5).
+  -j, --json          Output the report as JSON (machine-readable, for
+                      scripts, agents and LLMs). Exit codes are unchanged.
   -h, --help          Show this help.
   -V, --version       Print the version and exit.
       --update[=ver]  Self-update the PHAR to the latest release (or to the
@@ -253,6 +277,7 @@ TXT;
             'help' => false,
             'version' => false,
             'update' => null,
+            'json' => false,
             'lang' => null,
             'tolerance' => 0.5,
             'files' => [],
@@ -278,6 +303,11 @@ TXT;
             }
             if (strpos($arg, '--update=') === 0) {
                 $options['update'] = substr($arg, 9);
+                continue;
+            }
+
+            if ($arg === '--json' || $arg === '-j') {
+                $options['json'] = true;
                 continue;
             }
 
@@ -420,6 +450,42 @@ TXT;
                 $this->tokens = $tokens;
             }
         };
+    }
+
+    /**
+     * Machine-readable JSON report for scripts, agents and LLMs. Exit codes
+     * carry the verdict (0 = valid, 1 = defects, 2 = error), so consumers can
+     * rely on either the JSON fields or the process exit code.
+     */
+    private static function renderJson(string $original, string $translation, string $lang, float $tolerance, array $result): string
+    {
+        $defects = array_values($result['defects'] ?? []);
+
+        $byType = [];
+        foreach ($defects as $defect) {
+            $type = $defect['type'] ?? 'unknown';
+            $byType[$type] = ($byType[$type] ?? 0) + 1;
+        }
+        ksort($byType);
+
+        $data = [
+            'valid' => (bool)$result['valid'],
+            'result' => $result['valid'] ? 'passed' : 'failed',
+            'original' => $original,
+            'translation' => $translation,
+            'language' => $lang,
+            'timestamp_tolerance' => $tolerance,
+            'defect_count' => count($defects),
+            'defects_by_type' => $byType,
+            'defects' => $defects,
+        ];
+
+        return self::encodeJson($data);
+    }
+
+    private static function encodeJson(array $data): string
+    {
+        return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
     }
 
     private static function renderReport(string $original, string $translation, string $lang, float $tolerance, array $result): string
