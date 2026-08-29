@@ -34,22 +34,23 @@ $partialDe->save($root . '/examples/defect_partial_translation.de.srt');
 echo "Created defect_partial_translation.de.srt - captions 900-$totalCaptions in English (about 934 captions)\n";
 
 // ============================================
-// 2. Missing Parts - Remove a small block of captions
-// Realistic: a block of 6 captions missing from the middle
+// 2. Missing Parts - Remove a block of captions
+// Realistic: a block of 25 captions missing from the middle
+// (large enough to exceed the 1% content-loss threshold)
 // ============================================
-echo "Creating missing parts file (captions 500-505 removed)...\n";
+echo "Creating missing parts file (captions 500-524 removed)...\n";
 $missingDe = clone $originalDe;
 $missingBlocks = $missingDe->getInternalFormat();
 
-// Remove captions 500-505 (indices 499-504) - a small block in the middle
+// Remove captions 500-524 (indices 499-523) - a block in the middle
 $missingBlocks = array_merge(
     array_slice($missingBlocks, 0, 499),
-    array_slice($missingBlocks, 505)
+    array_slice($missingBlocks, 524)
 );
 
 $missingDe->setInternalFormat($missingBlocks);
 $missingDe->save($root . '/examples/defect_missing_parts.de.srt');
-echo "Created defect_missing_parts.de.srt with " . count($missingBlocks) . " captions (removed 6 from middle)\n";
+echo "Created defect_missing_parts.de.srt with " . count($missingBlocks) . " captions (removed 25 from middle)\n";
 
 // ============================================
 // 3. Timestamp Mismatch - Shift a small range
@@ -143,7 +144,7 @@ $p = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_partial_tr
 echo "Partial translation: " . count($p->getInternalFormat()) . " captions (first 900 German, rest English)\n";
 
 $m = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_missing_parts.de.srt');
-echo "Missing parts: " . count($m->getInternalFormat()) . " captions (6 removed)\n";
+echo "Missing parts: " . count($m->getInternalFormat()) . " captions (25 removed)\n";
 
 $t = Done\Subtitles\Subtitles::loadFromFile($root . '/examples/defect_timestamp_mismatch.de.srt');
 echo "Timestamp mismatch: " . count($t->getInternalFormat()) . " captions (20 shifted by +2s)\n";
