@@ -46,6 +46,11 @@ final class Cli
         }
 
         $files = $options['files'];
+
+        if ($options['readability']) {
+            return self::runReadability($files, $options);
+        }
+
         if (count($files) !== 2) {
             return self::fail(sprintf('expected exactly two subtitle files, got %d', count($files)), $json, true);
         }
@@ -83,6 +88,82 @@ final class Cli
             : self::renderReport($original, $translation, $lang, $options['tolerance'], $result);
 
         return $result['valid'] ? self::EXIT_OK : self::EXIT_DEFECTS;
+    }
+
+    /**
+     * Single-file readability audit: lists every caption that exceeds the
+     * readability limits. Purely advisory - the verdict and defect machinery
+     * are not involved. Exit code is 0 when no caption is problematic.
+     */
+    private static function runReadability(array $files, array $options): int
+    {
+        $json = $options['json'];
+
+        if (count($files) !== 1) {
+            return self::fail(sprintf('--readability expects exactly one subtitle file, got %d', count($files)), $json, true);
+        }
+        $file = $files[0];
+
+        if (!is_file($file) || !is_readable($file)) {
+            return self::fail('file does not exist or is not readable: ' . $file, $json);
+        }
+
+        try {
+            $blocks = Subtitles::loadFromFile($file)->getInternalFormat();
+        } catch (\Throwable $e) {
+            return self::fail('could not parse the subtitle file: ' . $file, $json);
+        }
+
+        $checker = new ReadabilityChecker();
+        $analysis = $checker->analyze(
+            $blocks,
+            $options['max_cps'],
+            $options['max_cpl'],
+            $options['max_lines']
+        );
+
+        // Ordering and listing limits only affect what is printed, never the
+        // file-wide stats or the exit code.
+        $problems = $analysis['problems'];
+        if ($options['worst_first']) {
+            self::sortProblemsWorstFirst($problems);
+        }
+        $limit = $options['limit'];
+        $shown = $limit !== null ? array_slice($problems, 0, $limit) : $problems;
+        $truncated = $limit !== null && count($problems) > $limit;
+
+        echo $json
+            ? self::renderReadabilityJson($file, $analysis, $shown, $truncated)
+            : self::renderReadabilityReport($file, $analysis, $shown, $truncated);
+
+        return empty($analysis['problems']) ? self::EXIT_OK : self::EXIT_DEFECTS;
+    }
+
+    /**
+     * Orders problems for triage: the most serious first - critical before
+     * minor, then fastest reading speed, then caption number as a stable tie.
+     *
+     * @param list<array> $problems
+     */
+    private static function sortProblemsWorstFirst(array &$problems): void
+    {
+        usort($problems, static function (array $a, array $b): int {
+            if ($a['severity'] !== $b['severity']) {
+                return $a['severity'] === 'critical' ? -1 : 1;
+            }
+            $ca = $a['cps'] ?? null;
+            $cb = $b['cps'] ?? null;
+            if ($ca !== null && $cb !== null && $ca !== $cb) {
+                return $ca < $cb ? 1 : -1;
+            }
+            if ($ca !== null) {
+                return -1;
+            }
+            if ($cb !== null) {
+                return 1;
+            }
+            return $a['caption'] <=> $b['caption'];
+        });
     }
 
     /**
@@ -240,10 +321,12 @@ Compares an original subtitle file against a translation and reports defects.
 
 USAGE:
   {$executable} <original-file> <translation-file> [options]
+  {$executable} <subtitle-file> --readability [options]
 
 POSITIONAL ARGUMENTS:
   original-file       The reference subtitle file (SRT or WebVTT).
   translation-file    The subtitle file being validated (SRT or WebVTT).
+  subtitle-file       A single subtitle file for the --readability audit (SRT or WebVTT).
 
 OPTIONS:
   -l, --lang=CODE     Expected language of the translation (ISO 639-1, e.g. de).
@@ -251,6 +334,20 @@ OPTIONS:
   -t, --tolerance=SEC Timestamp drift tolerance in seconds (default: 0.5).
   -j, --json          Output the report as JSON (machine-readable, for
                       scripts, agents and LLMs). Exit codes are unchanged.
+      --readability   Readability audit of a single subtitle file: list every
+                      caption that is too fast, too long or has too many
+                      lines. Purely advisory; no verdict or defects.
+      --max-cps=F     Max characters per second for --readability
+                      (default: 20.0).
+      --max-cpl=N     Max characters per line for --readability
+                      (default: 42).
+      --max-lines=N   Max lines per caption for --readability
+                      (default: 2).
+      --limit=N       Cap the readability listing to the first N problematic
+                      captions (default: show all). The file-wide stats and
+                      problems_by_type still cover every caption.
+      --worst-first   In the readability listing, order problems for triage:
+                      critical before minor, then fastest reading speed first.
       --strict        Fail on any error-severity defect, ignoring the
                        quality-ratio thresholds below.
        --max-loss-ratio=F      Max share of source captions with no
@@ -291,6 +388,18 @@ EXAMPLES:
   {$executable} original.srt translation.de.srt -l de
   {$executable} original.en.srt translated.srt
   {$executable} -t 0.2 -l de Movie.en.srt Movie.pt.srt
+  {$executable} Movie.de.srt --readability
+  {$executable} Movie.de.srt --readability --json --max-cps 15
+  {$executable} Movie.de.srt --readability --limit 50 --worst-first
+
+EXIT CODES for --readability:
+  0  Every caption is within the readability limits.
+  1  At least one caption exceeds a readability limit.
+  2  Usage error, or the file could not be read or parsed.
+
+NOTE: captions shorter than 0.2s carry no reliable reading-speed value; they
+are counted in "Captions" but excluded from the cps stats and "Avg reading
+speed".
 
 TXT;
     }
@@ -302,6 +411,7 @@ TXT;
             'version' => false,
             'update' => null,
             'json' => false,
+            'readability' => false,
             'lang' => null,
             'tolerance' => 0.5,
             'strict' => false,
@@ -312,6 +422,11 @@ TXT;
             'max_verbatim_ratio' => null,
             'max_script_ratio' => null,
             'max_errors' => null,
+            'max_cps' => null,
+            'max_cpl' => null,
+            'max_lines' => null,
+            'limit' => null,
+            'worst_first' => false,
             'files' => [],
         ];
 
@@ -343,6 +458,46 @@ TXT;
 
             if ($arg === '--json' || $arg === '-j') {
                 $options['json'] = true;
+                continue;
+            }
+
+            if ($arg === '--readability') {
+                $options['readability'] = true;
+                continue;
+            }
+
+            $readabilityLimits = [
+                '--max-cps' => 'max_cps',
+                '--max-cpl' => 'max_cpl',
+                '--max-lines' => 'max_lines',
+            ];
+            if (isset($readabilityLimits[$arg])) {
+                $value = $normalized[++$i] ?? '';
+                if ($arg === '--max-lines') {
+                    if (!ctype_digit($value) || (int)$value < 1) {
+                        return null;
+                    }
+                    $options['max_lines'] = (int)$value;
+                } else {
+                    if (!is_numeric($value) || (float)$value < 0) {
+                        return null;
+                    }
+                    $options[$readabilityLimits[$arg]] = (float)$value;
+                }
+                continue;
+            }
+
+            if ($arg === '--limit') {
+                $value = $normalized[++$i] ?? '';
+                if (!ctype_digit($value) || (int)$value < 1) {
+                    return null;
+                }
+                $options['limit'] = (int)$value;
+                continue;
+            }
+
+            if ($arg === '--worst-first') {
+                $options['worst_first'] = true;
                 continue;
             }
 
@@ -650,9 +805,108 @@ TXT;
         return $out;
     }
 
+    private static function renderReadabilityJson(string $file, array $analysis, array $shown, bool $truncated): string
+    {
+        return self::encodeJson([
+            'file' => $file,
+            'mode' => 'readability',
+            'captions' => $analysis['captions'],
+            'analyzed' => $analysis['analyzed'],
+            'avg_cps' => $analysis['avg_cps'],
+            'max_cps' => $analysis['max_cps'],
+            'max_cps_caption' => $analysis['max_cps_caption'],
+            'max_cpl' => $analysis['max_cpl'],
+            'max_cpl_caption' => $analysis['max_cpl_caption'],
+            'thresholds' => $analysis['thresholds'],
+            'problem_count' => count($analysis['problems']),
+            'problems_by_type' => $analysis['problems_by_type'],
+            'truncated' => $truncated,
+            'shown' => count($shown),
+            'problems' => $shown,
+        ]);
+    }
+
+    private static function renderReadabilityReport(string $file, array $analysis, array $shown, bool $truncated): string
+    {
+        $bar = str_repeat('=', self::REPORT_WIDTH);
+        $dash = str_repeat('-', self::REPORT_WIDTH);
+        $total = count($analysis['problems']);
+
+        $out = $bar . "\n";
+        $out .= '  Readability Audit' . "\n";
+        $out .= $bar . "\n\n";
+
+        $out .= self::line('File', $file);
+        $out .= self::line('Captions', (string)$analysis['captions']);
+        $out .= self::line('Avg reading speed', sprintf('%.1f cps', $analysis['avg_cps']));
+        $out .= self::line('Max reading speed', sprintf('%.1f cps (caption #%d)', $analysis['max_cps'], $analysis['max_cps_caption']));
+        $t = $analysis['thresholds'];
+        $out .= self::line('Limits', sprintf('%.0f cps, %d chars/line, %d lines', $t['max_cps'], $t['max_cpl'], $t['max_lines']));
+        $out .= self::line('Problematic captions', (string)$total);
+        $out .= "\n";
+
+        if ($total === 0) {
+            $out .= '  No readability problems found.' . "\n\n";
+            $out .= $bar . "\n";
+            $out .= '  RESULT: READABLE' . "\n";
+            $out .= $bar . "\n";
+            return $out;
+        }
+
+        $out .= sprintf('  Problematic captions (%d)' . "\n", $total);
+        if ($truncated) {
+            $out .= sprintf('  Showing %d of %d (--limit %d). Use --worst-first for triage.' . "\n", count($shown), $total, count($shown));
+        }
+        $out .= $dash . "\n\n";
+
+        $number = 0;
+        foreach ($shown as $problem) {
+            $number++;
+            $out .= sprintf(
+                '  %d. caption #%d  [%s]  [%s --> %s]  (%.1fs, %d chars)' . "\n",
+                $number,
+                $problem['caption'],
+                $problem['severity'],
+                self::formatTimecode($problem['start_seconds']),
+                self::formatTimecode($problem['end_seconds']),
+                $problem['duration_seconds'],
+                $problem['chars']
+            );
+            foreach ($problem['issues'] as $issue) {
+                $out .= self::readabilityIssueLine($issue);
+            }
+            foreach ($problem['lines'] as $line) {
+                if ($line !== '') {
+                    $out .= '     | ' . $line . "\n";
+                }
+            }
+            $out .= "\n";
+        }
+
+        $out .= $bar . "\n";
+        $out .= sprintf('  RESULT: %d problematic caption(s) found' . "\n", $total);
+        $out .= $bar . "\n";
+
+        return $out;
+    }
+
     private static function line(string $label, string $value): string
     {
         return sprintf('  %-19s %s' . "\n", $label . ':', $value);
+    }
+
+    private static function readabilityIssueLine(array $issue): string
+    {
+        $severity = isset($issue['severity']) ? $issue['severity'] . ' - ' : '';
+        switch ($issue['type']) {
+            case 'reading_speed':
+                return sprintf('     - %sreading speed %.1f cps exceeds the %.1f cps limit' . "\n", $severity, $issue['value'], $issue['limit']);
+            case 'line_length':
+                return sprintf('     - %sline length %d chars exceeds the %d chars limit' . "\n", $severity, $issue['value'], $issue['limit']);
+            case 'line_count':
+                return sprintf('     - %s%d lines exceeds the %d lines limit' . "\n", $severity, $issue['value'], $issue['limit']);
+        }
+        return '     - ' . $issue['type'] . "\n";
     }
 
     private static function renderDefect(int $number, array $defect): string

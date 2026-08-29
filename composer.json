@@ -2,6 +2,7 @@
     "name": "srt/translation-validator",
     "description": "Validates subtitle translations: detects missing captions, partial translation, untranslated copies, foreign-script characters, timestamp mismatch, and invalid SRT/WebVTT format",
     "keywords": ["subtitles", "srt", "webvtt", "translation", "validator"],
+    "license": "proprietary",
     "require": {
         "php": "^7.4|^8.0",
         "mantas-done/subtitles": "^1.0",

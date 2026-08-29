@@ -1,0 +1,32 @@
+# Subtitle Translation Validator - License
+
+Copyright (c) 2026 the author of srt-translation-validator. All rights reserved.
+
+## Granted rights
+
+You may download, install, run, copy, study, and modify this software, and use
+it or your own modifications of it for your own purposes - personal or
+commercial - including validating subtitles for projects you yourself work on.
+
+## Reserved rights
+
+You may NOT:
+
+- offer this software, or a service substantially based on it, to third
+  parties as a hosted or remote service (Software-as-a-Service, API
+  provisioning, or any form where the software runs for someone other than
+  yourself);
+- sell, sublicense, or redistribute the software commercially, whether as-is
+  or in modified form, in any way not covered by the granted rights above;
+- claim the software or its modifications as your original work.
+
+In short: everyone may run this tool for their own use. Only the author may
+operate it as a service.
+
+## No warranty
+
+This software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and non-infringement. In no event shall the
+authors or copyright holders be liable for any claim, damages, or other
+liability arising from, out of, or in connection with the software.

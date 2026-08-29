@@ -26,6 +26,8 @@ class CliTest extends TestCase
         $this->fixtures['merged'] = $this->tmp . '/merged.srt';
         $this->fixtures['drifted'] = $this->tmp . '/drifted.srt';
         $this->fixtures['scriptmix'] = $this->tmp . '/scriptmix.srt';
+        $this->fixtures['cleanread'] = $this->tmp . '/clean-read.srt';
+        $this->fixtures['threeline'] = $this->tmp . '/three-line.srt';
 
         $english = 'The quick brown fox jumps over the lazy dog near the river bank.';
         $german = 'Der schnelle braune Fuchs sprang über den faulen Hund am Flussufer.';
@@ -63,6 +65,19 @@ class CliTest extends TestCase
         file_put_contents($this->fixtures['malformed'], "1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\nBROKEN_LINE_WITHOUT_TIMESTAMP\nMehr Text\n\n");
         file_put_contents($this->fixtures['merged'], implode("\n", $mergedLines));
         file_put_contents($this->fixtures['drifted'], implode("\n", $driftedLines));
+
+        // Readability fixtures: a clean 3s-per-caption file and a 3-line
+        // caption file flagged mainly for line count.
+        $cleanRead = [];
+        for ($i = 1; $i <= 3; $i++) {
+            $start = 4 * ($i - 1);
+            $cleanRead[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($start + 3)) . "\nA short readable line.\n";
+        }
+        file_put_contents($this->fixtures['cleanread'], implode("\n", $cleanRead));
+
+        file_put_contents($this->fixtures['threeline'], "1\n"
+            . sprintf('%s --> %s', $this->tc(0), $this->tc(4)) . "\n"
+            . "Line one\nLine two\nLine three\n");
     }
 
     protected function tearDown(): void
@@ -339,5 +354,140 @@ class CliTest extends TestCase
         $this->assertStringContainsString('reading speed:', $output);
         $this->assertStringContainsString('line length:', $output);
         $this->assertMatchesRegularExpression('/reading speed:\s+[\d.]+ cps avg, [\d.]+ cps max \(caption #\d+\)/', $output);
+    }
+
+    public function testReadabilityJsonListsProblemsAndFails(): void
+    {
+        // The translated fixture is 20 one-second captions of ~68 chars:
+        // every one exceeds 20 cps and 42 chars/line.
+        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertSame('readability', $data['mode']);
+        $this->assertSame(20, $data['captions']);
+        $this->assertSame(20, $data['problem_count']);
+        $this->assertArrayHasKey('reading_speed', $data['problems_by_type']);
+        $this->assertArrayNotHasKey('line_count', $data['problems_by_type']);
+
+        $problem = $data['problems'][0];
+        $this->assertSame(1, $problem['caption']);
+        $this->assertArrayHasKey('start_seconds', $problem);
+        $this->assertArrayHasKey('end_seconds', $problem);
+        $this->assertArrayHasKey('text', $problem);
+        $this->assertArrayHasKey('issues', $problem);
+        $this->assertSame(20, $data['thresholds']['max_cps']);
+        $this->assertSame(42, $data['thresholds']['max_cpl']);
+    }
+
+    public function testReadabilityJsonReportsCleanFile(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['cleanread']]);
+        $this->assertSame(0, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertSame(0, $data['problem_count']);
+        $this->assertSame([], $data['problems']);
+        $this->assertSame([], $data['problems_by_type']);
+        $this->assertSame(3, $data['captions']);
+    }
+
+    public function testReadabilityRequiresExactlyOneFile(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['original'], $this->fixtures['translated']]);
+        $this->assertSame(2, $exit);
+        $this->assertStringContainsString('--readability expects exactly one subtitle file, got 2', $output);
+    }
+
+    public function testReadabilityHumanReport(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+        $this->assertStringContainsString('Readability Audit', $output);
+        $this->assertStringContainsString('Problematic captions (20)', $output);
+        $this->assertStringContainsString('caption #1', $output);
+        $this->assertStringContainsString('exceeds the 20.0 cps limit', $output);
+        $this->assertStringContainsString('RESULT: 20 problematic caption(s) found', $output);
+    }
+
+    public function testReadabilityCleanFileHumanReport(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['cleanread']]);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('No readability problems found.', $output);
+        $this->assertStringContainsString('RESULT: READABLE', $output);
+    }
+
+    public function testReadabilityLineLimitOverride(): void
+    {
+        // Default max-lines=2 flags the 3-line caption; raising it passes.
+        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['threeline']]);
+        $this->assertSame(1, $exit, $output);
+        $data = json_decode($output, true);
+        $this->assertSame(1, $data['problem_count']);
+        $this->assertSame(['line_count' => 1], $data['problems_by_type']);
+
+        [$exitRaised, $outputRaised] = $this->execute(['--readability', '--json', '--max-lines', '3', $this->fixtures['threeline']]);
+        $this->assertSame(0, $exitRaised, $outputRaised);
+        $this->assertSame(0, json_decode($outputRaised, true)['problem_count']);
+    }
+
+    public function testReadabilityLimitTruncatesJson(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '3', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertSame(20, $data['problem_count']);
+        $this->assertSame(3, $data['shown']);
+        $this->assertTrue($data['truncated']);
+        $this->assertCount(3, $data['problems']);
+        // problems_by_type still summarizes every caption, not just the shown 3.
+        $this->assertSame(['reading_speed' => 20, 'line_length' => 20], $data['problems_by_type']);
+    }
+
+    public function testReadabilityLimitAboveTotalIsNotTruncated(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '100', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertSame(20, $data['shown']);
+        $this->assertFalse($data['truncated']);
+        $this->assertCount(20, $data['problems']);
+    }
+
+    public function testReadabilityInvalidLimitIsUsageError(): void
+    {
+        [$exitZero] = $this->execute(['--readability', '--limit', '0', $this->fixtures['translated']]);
+        $this->assertSame(2, $exitZero);
+
+        [$exitLetters] = $this->execute(['--readability', '--limit', 'abc', $this->fixtures['translated']]);
+        $this->assertSame(2, $exitLetters);
+    }
+
+    public function testReadabilityWorstFirstOrdersByReadingSpeed(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', '--json', '--worst-first', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertCount(20, $data['problems']);
+
+        $cps = array_column($data['problems'], 'cps');
+        for ($i = 1; $i < count($cps); $i++) {
+            $this->assertGreaterThanOrEqual($cps[$i], $cps[$i - 1], 'caption ' . $data['problems'][$i]['caption'] . ' out of order');
+        }
+        $this->assertNotSame(1, $data['problems'][0]['caption']);
+        $this->assertSame('critical', $data['problems'][0]['severity']);
+        $this->assertSame('critical', $data['problems'][0]['issues'][0]['severity']);
+    }
+
+    public function testReadabilityHumanReportCarriesSeverity(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['translated']]);
+        $this->assertSame(1, $exit, $output);
+        $this->assertStringContainsString('[critical]', $output);
+        $this->assertStringContainsString('critical - reading speed', $output);
     }
 }

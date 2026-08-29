@@ -111,6 +111,12 @@ compares them, and prints a human-readable report.
 | `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
 | `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
 | `--max-errors=N`       | Fail when more than N error-severity defects are found, regardless of the ratios (default: no limit). |
+| `--readability`        | Readability audit of a single subtitle file: runs a per-caption check against readability limits and lists every caption that exceeds them. Purely advisory - no verdict, no defects, exit code is 0 when every caption is clean and 1 when problems are found. Takes exactly one file. |
+| `--max-cps=F`          | Max characters per second for the `--readability` audit (default: `20.0`). |
+| `--max-cpl=N`          | Max characters per line for the `--readability` audit (default: `42`). |
+| `--max-lines=N`        | Max lines per caption for the `--readability` audit (default: `2`). |
+| `--limit=N`            | Cap the `--readability` listing to the first N problematic captions. File-wide stats and `problems_by_type` still cover every caption (default: show all). |
+| `--worst-first`        | In the `--readability` listing, order problems for triage: critical before minor, then fastest reading speed first. |
 | `-h, --help`           | Show usage help.                                                         |
 | `-V, --version`        | Print the version and exit.                                              |
 | `--update[=version]`   | Update the tool to the latest release (or a specific version, e.g. `--update=1.0.1`). |
@@ -247,6 +253,69 @@ Original captions #316 are merged into translation caption #316
 
 A failed validation prints `RESULT: FAILED`, the error/warning counts and one
 line per exceeded quality limit.
+
+## Readability audit
+
+Pass `--readability` with **exactly one** subtitle file to list every caption
+that is hard to read. It is a separate, advisory mode: no verdict, no defects,
+no language detection - just the captions that exceed the readability limits,
+with their exact values against the limits.
+
+```bash
+srt-translation-validator Movie.de.srt --readability
+srt-translation-validator Movie.de.srt --readability --json   # for scripts/LLMs
+srt-translation-validator Movie.de.srt --readability --max-cps 15 --max-cpl 37
+srt-translation-validator Movie.de.srt --readability --limit 50 --worst-first
+```
+
+Limits (ISO-style subtitle guidelines): `--max-cps` characters per second
+(default `20`), `--max-cpl` characters per line (default `42`), `--max-lines`
+(default `2`).
+
+Every problem carries a severity: **`critical`** when a value exceeds *twice*
+its limit, otherwise **`minor`**. A caption is `critical` when any of its
+issues is critical. `--limit N` caps the listing (stats still cover every
+caption); `--worst-first` orders the listing for triage - critical first,
+then fastest reading speed.
+
+Exit codes: `0` every caption is clean, `1` at least one caption exceeds a
+limit, `2` usage error or the file could not be read/parsed.
+
+Captions shorter than `0.2s` are too brief to measure reading speed reliably:
+they count towards `captions` but are excluded from the cps stats and
+`avg_cps` (see `analyzed` in the JSON).
+
+Human-readable output:
+
+```
+==================================================================
+  Readability Audit
+==================================================================
+
+  File:               Movie.de.srt
+  Captions:           1834
+  Avg reading speed:  12.4 cps
+  Max reading speed:  48.6 cps (caption #1485)
+  Limits:             20 cps, 42 chars/line, 2 lines
+  Problematic captions: 259
+
+  Problematic captions (259)
+------------------------------------------------------------------
+
+  1. caption #1485  [critical]  [01:37:06,520 --> 01:37:07,755]  (1.2s, 60 chars)
+     - critical - reading speed 48.6 cps exceeds the 20.0 cps limit
+     | ICH GLAUBE, WENN DU ES WIRKLICH
+     | ERNST MEINST, IHN ZU RETTEN,
+
+...
+```
+
+JSON output omits nothing: each problem carries `caption`, `severity`,
+`start_seconds`, `end_seconds`, `duration_seconds`, `chars`, `cps`, the full
+`text` and an `issues` array (`type`, `value`, `limit`, `severity`), plus a
+`problems_by_type` summary and the `thresholds` used. With `--limit`, `shown`
+holds the capped count and `truncated` is `true` when problems were dropped;
+`problems_by_type` and the stats always describe every caption.
 
 ## Updating the tool
 
@@ -537,6 +606,7 @@ src/                          Library classes (PSR-4: SrtValidator\)
   SubtitleFormatValidator.php Regex-based SRT/WebVTT structure validation
   CaptionAligner.php          Aligns source/translation captions on the timeline
   ScriptChecker.php           Foreign-script ("character hallucination") detection
+  ReadabilityChecker.php      Per-caption readability audit (--readability)
   Cli.php                     CLI parsing, report rendering, --version/--update
 bin/srt-validator             Executable command-line entry point
 build/build-phar.php          PHAR builder (embeds VERSION + release repo)
