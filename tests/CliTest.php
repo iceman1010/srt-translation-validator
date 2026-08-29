@@ -203,6 +203,17 @@ class CliTest extends TestCase
         $this->assertStringContainsString('INVALID FORMAT', $output);
     }
 
+    public function testMalformedSourcePassesWithWarning(): void
+    {
+        $bad = $this->tmp . '/bad-source.srt';
+        file_put_contents($bad, "this is not a subtitle file at all\n");
+        $this->fixtures[] = $bad;
+        [$exit, $output] = $this->execute([$bad, $this->fixtures['translated'], '-l', 'de']);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('SOURCE PARSE FAILED', $output);
+        $this->assertStringContainsString('RESULT: PASSED', $output);
+    }
+
     public function testStrictToleranceOption(): void
     {
         [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de', '-t', '0.1']);

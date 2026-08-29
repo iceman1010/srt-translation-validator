@@ -209,6 +209,79 @@ class SrtTranslationValidatorTest extends TestCase
         $this->assertNotEmpty($result['defects']);
     }
 
+    public function testMalformedSourceIsNotATranslationFailure(): void
+    {
+        // Invalid format in the SOURCE file (both plain garbage and real NUL
+        // bytes) must never be flagged as a translation error: the verdict is
+        // skipped with an informational warning instead.
+        foreach (['plain garbage' => "this is not a subtitle file\nat all\n", 'nul bytes' => "1\n00:00:01,000 --> 00:00:03,000\n\x00binary\x00\n"] as $garbage) {
+            $source = $this->examplesDir . 'tmp_bad_source.srt';
+            file_put_contents($source, $garbage);
+            try {
+                $result = $this->validator->validate(
+                    $source,
+                    $this->examplesDir . 'The.Matrix.1999.Tubi.CC.de.srt',
+                    'de'
+                );
+
+                $this->assertTrue($result['valid'], "A malformed source ({$garbage}) must never fail the translation");
+                $this->assertSame(0, $result['error_count']);
+                $this->assertSame(1, $result['warning_count']);
+                $this->assertSame('source_parse_failed', $result['defects'][0]['type']);
+                $this->assertSame('warning', $result['defects'][0]['severity']);
+                $this->assertArrayNotHasKey('ratios', $result['quality'], 'No comparison runs against an unreadable source');
+            } finally {
+                @unlink($source);
+            }
+        }
+    }
+
+    public function testMalformedTranslationStillFails(): void
+    {
+        $translation = $this->examplesDir . 'tmp_bad_translation.srt';
+        file_put_contents($translation, "1\n00:00:01,000 --> 00:00:03,000\n\x00binary\x00\n");
+        try {
+            $result = $this->validator->validate(
+                $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt',
+                $translation,
+                'de'
+            );
+
+            $this->assertFalse($result['valid'], 'A malformed translation must still fail');
+            $this->assertGreaterThan(0, $result['error_count']);
+            $subtypes = array_map(function ($defect) {
+                return $defect['subtype'] ?? null;
+            }, $result['defects']);
+            $this->assertContains('binary_content', $subtypes, 'NUL bytes in the translation output must be an error');
+        } finally {
+            @unlink($translation);
+        }
+    }
+
+    public function testFormatMismatchComparesOnCueStructure(): void
+    {
+        $origPath = $this->examplesDir . 'tmp_mismatch.en.srt';
+        $transPath = $this->examplesDir . 'tmp_mismatch.de.vtt';
+        file_put_contents($origPath, "1\n00:00:01,000 --> 00:00:03,000\nHello world\n");
+        file_put_contents($transPath, "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHallo Welt\n");
+        try {
+            $result = $this->validator->validate($origPath, $transPath, 'de');
+
+            $this->assertTrue($result['valid'], 'Cue-identical VTT translation of an SRT source must stay usable');
+            $this->assertSame(0, $result['error_count']);
+            $this->assertSame(1, $result['warning_count']);
+
+            $mismatch = array_filter($result['defects'], function ($defect) {
+                return $defect['type'] === 'format_mismatch';
+            });
+            $this->assertCount(1, $mismatch);
+            $this->assertSame('warning', reset($mismatch)['severity']);
+        } finally {
+            @unlink($origPath);
+            @unlink($transPath);
+        }
+    }
+
     public function testInvalidFormatDefect()
     {
         $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';

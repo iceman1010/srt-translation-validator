@@ -135,28 +135,46 @@ final class SrtTranslationValidator
         $originalFormat = $this->formatValidator->validateFile($originalPath);
         $translationFormat = $this->formatValidator->validateFile($translationPath);
 
-        foreach ([$originalFormat, $translationFormat] as $format) {
-            if ($format['format'] === null || !$format['valid']) {
-                return $this->buildResult($this->formatDefects($format));
-            }
+        // The translation is the artefact under review: any format failure in
+        // the translation is a translation-model failure and fails the job.
+        if ($translationFormat['format'] === null || !$translationFormat['valid']) {
+            return $this->buildResult($this->formatDefects($translationFormat));
+        }
+        $defects = [];
+
+        // The source file is the user's input and sits outside the model's
+        // mandate: a malformed source is reported as an informational warning
+        // and the verdict is skipped, never turned into a translation failure.
+        if ($originalFormat['format'] === null || !$originalFormat['valid']) {
+            $defects[] = $this->sourceParseFailedDefect($originalFormat);
+            return $this->buildResult($defects);
         }
 
+        // Compare on cue structure regardless of the container type.
         if ($originalFormat['format'] !== $translationFormat['format']) {
-            return $this->buildResult([[
-                'type' => 'invalid_format',
-                'severity' => 'error',
-                'message' => "Format mismatch: original file is {$originalFormat['format']} but translation is {$translationFormat['format']}"
-            ]]);
+            $defects[] = [
+                'type' => 'format_mismatch',
+                'severity' => 'warning',
+                'message' => sprintf(
+                    'Container format differs between source (%s) and translation (%s); compared on cue structure',
+                    $originalFormat['format'],
+                    $translationFormat['format']
+                ),
+            ];
         }
 
         $original = $this->parseSubtitles($originalPath);
         $translation = $this->parseSubtitles($translationPath);
-        if ($original === null || $translation === null) {
-            return $this->buildResult([[
+        if ($original === null) {
+            $defects[] = $this->sourceParseFailedDefect($originalFormat, true);
+            return $this->buildResult($defects);
+        }
+        if ($translation === null) {
+            return $this->buildResult(array_merge($defects, [[
                 'type' => 'invalid_format',
                 'severity' => 'error',
-                'message' => 'Failed to parse subtitle file after format validation passed'
-            ]]);
+                'message' => 'Failed to parse translation file after format validation passed'
+            ]]));
         }
 
         $originalBlocks = $original->getInternalFormat();
@@ -168,7 +186,7 @@ final class SrtTranslationValidator
 
         $partial = $this->detectPartialTranslation($translationBlocks, $expectedLanguage);
 
-        $defects = array_merge($alignmentDefects, $partial['defects']);
+        $defects = array_merge($defects, $alignmentDefects, $partial['defects']);
 
         if ($stats['compared_pairs'] > 0 && $stats['verbatim_ratio'] > $this->maxVerbatimRatio) {
             $defects[] = [
@@ -301,6 +319,28 @@ final class SrtTranslationValidator
             ];
         }
         return $defects;
+    }
+
+    /**
+     * The source file is the user's input, not the model's output. When it is
+     * malformed or unreadable, the translation cannot be judged against it, so
+     * the comparison is skipped and only an informational warning is emitted --
+     * never a translation failure. $afterValidation covers the rare case where
+     * the source passed format validation but still could not be parsed.
+     */
+    private function sourceParseFailedDefect(array $formatResult, bool $afterValidation = false): array
+    {
+        $message = 'Source file is malformed or unreadable; translation verdict skipped';
+        if ($afterValidation) {
+            $message = 'Source file could not be parsed as subtitles after format validation passed; translation verdict skipped';
+        } elseif (!empty($formatResult['errors'])) {
+            $details = array_map(
+                static fn (array $e): string => (string)($e['message'] ?? ''),
+                array_slice($formatResult['errors'], 0, 3)
+            );
+            $message .= ': ' . implode('; ', $details);
+        }
+        return ['type' => 'source_parse_failed', 'severity' => 'warning', 'message' => $message];
     }
 
     private function parseSubtitles(string $path): ?Subtitles
