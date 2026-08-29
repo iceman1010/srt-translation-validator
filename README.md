@@ -86,6 +86,23 @@ sudo mv srt-translation-validator.phar /usr/local/bin/srt-translation-validator
 
 After that, `srt-translation-validator` works as a normal command.
 
+### Installing via Composer
+
+The tool is also on
+[Packagist](https://packagist.org/packages/srt/translation-validator), so you can
+install it with Composer and get it as a command-line tool without downloading
+the PHAR:
+
+```bash
+composer global require srt/translation-validator
+```
+
+Add Composer's global `bin` directory to your `PATH` (e.g.
+`~/.config/composer/vendor/bin` on Linux, `~/.composer/vendor/bin` on macOS),
+then run it as `srt-validator`. Or require it in a project for its PHP API and
+use `vendor/bin/srt-validator`. Composer installs from the source via git tags;
+the PHAR from the Releases page is the always-current compiled build.
+
 ## Usage
 
 ```bash
