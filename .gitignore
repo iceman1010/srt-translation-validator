@@ -2,8 +2,14 @@
 /examples/*.srt
 /docs/
 
+# Local pointer to the real-subtitle corpus (copyright, outside the repo)
+/tests/.corpus_dir
+
 # Built PHAR archive
 /build/*.phar
+
+# Composer dependencies (reproducible via composer install with composer.lock)
+/vendor/
 
 # PHPUnit result cache
 .phpunit.result.cache

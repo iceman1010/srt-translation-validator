@@ -72,6 +72,8 @@ final class Cli
         $validator->setMaxDriftRatio($options['max_drift_ratio']);
         $validator->setMaxPartialRatio($options['max_partial_ratio']);
         $validator->setMaxMergeRatio($options['max_merge_ratio']);
+        $validator->setMaxVerbatimRatio($options['max_verbatim_ratio']);
+        $validator->setMaxErrors($options['max_errors']);
 
         $result = $validator->validate($original, $translation, $lang);
 
@@ -249,16 +251,22 @@ OPTIONS:
   -j, --json          Output the report as JSON (machine-readable, for
                       scripts, agents and LLMs). Exit codes are unchanged.
       --strict        Fail on any error-severity defect, ignoring the
-                      quality-ratio thresholds below.
-      --max-loss-ratio=F      Max share of source captions with no
-                              translation at all (default: 0.01).
-      --max-drift-ratio=F    Max share of aligned captions with timestamp
-                              drift beyond the tolerance (default: 0.02).
-      --max-partial-ratio=F  Max share of translation chars detected in the
-                              wrong language (default: 0.05).
-      --max-merge-ratio=F    Max share of source captions merged into
-                              neighbouring translation captions
-                              (default: 0.10).
+                       quality-ratio thresholds below.
+       --max-loss-ratio=F      Max share of source captions with no
+                               translation at all (default: 0.01).
+       --max-drift-ratio=F    Max share of aligned captions with timestamp
+                               drift beyond the tolerance (default: 0.02).
+       --max-partial-ratio=F  Max share of translation chars detected in the
+                               wrong language (default: 0.05).
+       --max-merge-ratio=F    Max share of source captions merged into
+                               neighbouring translation captions
+                               (default: 0.10).
+       --max-verbatim-ratio=F Max share of aligned captions that may be
+                               verbatim copies of the source, i.e. no
+                               translation happened (default: 0.50).
+       --max-errors=N         Fail when more than N error-severity defects
+                               are found, regardless of the ratios
+                               (default: no limit).
   -h, --help          Show this help.
   -V, --version       Print the version and exit.
       --update[=ver]  Self-update the PHAR to the latest release (or to the
@@ -296,6 +304,8 @@ TXT;
             'max_drift_ratio' => null,
             'max_partial_ratio' => null,
             'max_merge_ratio' => null,
+            'max_verbatim_ratio' => null,
+            'max_errors' => null,
             'files' => [],
         ];
 
@@ -340,6 +350,7 @@ TXT;
                 '--max-drift-ratio' => 'max_drift_ratio',
                 '--max-partial-ratio' => 'max_partial_ratio',
                 '--max-merge-ratio' => 'max_merge_ratio',
+                '--max-verbatim-ratio' => 'max_verbatim_ratio',
             ];
             if (isset($ratioOptions[$arg])) {
                 $value = $normalized[++$i] ?? '';
@@ -347,6 +358,15 @@ TXT;
                     return null;
                 }
                 $options[$ratioOptions[$arg]] = (float)$value;
+                continue;
+            }
+
+            if ($arg === '--max-errors') {
+                $value = $normalized[++$i] ?? '';
+                if (!ctype_digit($value)) {
+                    return null;
+                }
+                $options['max_errors'] = (int)$value;
                 continue;
             }
 
@@ -552,13 +572,15 @@ TXT;
             $out .= '  Quality' . "\n";
             $out .= $dash . "\n";
             foreach ($result['quality']['ratios'] as $name => $ratio) {
-                $threshold = $result['quality']['thresholds'][$name] ?? 0.0;
-                $out .= sprintf(
-                    '  %-19s %5.1f%%  (max %.1f%%)' . "\n",
-                    str_replace('_', ' ', $name) . ':',
-                    $ratio * 100,
-                    $threshold * 100
-                );
+                $threshold = $result['quality']['thresholds'][$name] ?? null;
+                $label = str_replace('_', ' ', $name) . ':';
+                $out .= $threshold === null
+                    ? sprintf('  %-19s %5.1f%%  (advisory)' . "\n", $label, $ratio * 100)
+                    : sprintf('  %-19s %5.1f%%  (max %.1f%%)' . "\n", $label, $ratio * 100, $threshold * 100);
+            }
+            $maxErrors = $result['quality']['max_errors'] ?? null;
+            if ($maxErrors !== null) {
+                $out .= sprintf('  %-19s %d' . "\n", 'error limit:', $maxErrors);
             }
             $out .= "\n";
         }

@@ -33,6 +33,7 @@ final class SrtTranslationValidator
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
     private const DEFAULT_MAX_PARTIAL_RATIO = 0.05;
     private const DEFAULT_MAX_MERGE_RATIO = 0.10;
+    private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
 
     private Language $languageDetector;
     private SubtitleFormatValidator $formatValidator;
@@ -42,6 +43,9 @@ final class SrtTranslationValidator
     private float $maxDriftRatio = self::DEFAULT_MAX_DRIFT_RATIO;
     private float $maxPartialRatio = self::DEFAULT_MAX_PARTIAL_RATIO;
     private float $maxMergeRatio = self::DEFAULT_MAX_MERGE_RATIO;
+    private float $maxVerbatimRatio = self::DEFAULT_MAX_VERBATIM_RATIO;
+    /** null = no error-count gate (ratio thresholds decide alone). */
+    private ?int $maxErrors = null;
     private bool $strict = false;
 
     /**
@@ -97,6 +101,23 @@ final class SrtTranslationValidator
         }
     }
 
+    public function setMaxVerbatimRatio(?float $ratio): void
+    {
+        if ($ratio !== null) {
+            $this->maxVerbatimRatio = $ratio;
+        }
+    }
+
+    /**
+     * Fail when the number of error-severity defects exceeds this count,
+     * regardless of the ratio thresholds. null disables the gate (default:
+     * the thresholds decide alone).
+     */
+    public function setMaxErrors(?int $count): void
+    {
+        $this->maxErrors = $count;
+    }
+
     /**
      * Compares a translation against its original and returns a result array:
      * ['valid' => bool, 'defects' => list<array>, 'error_count' => int,
@@ -149,6 +170,22 @@ final class SrtTranslationValidator
 
         $defects = array_merge($alignmentDefects, $partial['defects']);
 
+        if ($stats['compared_pairs'] > 0 && $stats['verbatim_ratio'] > $this->maxVerbatimRatio) {
+            $defects[] = [
+                'type' => 'untranslated_copy',
+                'severity' => 'error',
+                'message' => sprintf(
+                    '%d of %d aligned captions are verbatim copies of the source (%.1f%%) - this appears to be an untranslated copy',
+                    $stats['identical_pairs'],
+                    $stats['compared_pairs'],
+                    $stats['verbatim_ratio'] * 100
+                ),
+                'identical_pairs' => $stats['identical_pairs'],
+                'compared_pairs' => $stats['compared_pairs'],
+                'ratio' => $stats['verbatim_ratio']
+            ];
+        }
+
         return $this->buildResult($defects, [
             'source_captions' => $stats['source_captions'],
             'aligned_pairs' => $stats['aligned_pairs'],
@@ -160,13 +197,20 @@ final class SrtTranslationValidator
                     ? round($partial['wrong_chars'] / $partial['analyzed_chars'], 4)
                     : 0.0,
                 'merged' => $stats['merge_ratio'],
+                'verbatim_copy' => $stats['verbatim_ratio'],
+                'unaligned' => $stats['source_captions'] > 0
+                    ? round(1 - $stats['aligned_pairs'] / $stats['source_captions'], 4)
+                    : 0.0,
             ],
             'thresholds' => [
                 'content_loss' => $this->maxLossRatio,
                 'timestamp_drift' => $this->maxDriftRatio,
                 'partial_translation' => $this->maxPartialRatio,
                 'merged' => $this->maxMergeRatio,
+                'verbatim_copy' => $this->maxVerbatimRatio,
+                'unaligned' => null,
             ],
+            'max_errors' => $this->maxErrors,
             'strict' => $this->strict,
         ]);
     }
@@ -218,15 +262,24 @@ final class SrtTranslationValidator
         }
 
         $reasons = [];
+        if ($this->maxErrors !== null && $errorCount > $this->maxErrors) {
+            $reasons[] = sprintf(
+                '%d error-severity defects exceed the limit of %d',
+                $errorCount,
+                $this->maxErrors
+            );
+        }
         foreach ($ratios as $name => $value) {
-            if ($value > $thresholds[$name]) {
-                $reasons[] = sprintf(
-                    '%s %.2f%% exceeds the threshold %.2f%%',
-                    str_replace('_', ' ', $name),
-                    $value * 100,
-                    $thresholds[$name] * 100
-                );
+            $threshold = $thresholds[$name] ?? null;
+            if ($threshold === null || $value <= $threshold) {
+                continue;
             }
+            $reasons[] = sprintf(
+                '%s %.2f%% exceeds the threshold %.2f%%',
+                str_replace('_', ' ', $name),
+                $value * 100,
+                $threshold * 100
+            );
         }
         return $reasons;
     }
@@ -270,7 +323,7 @@ final class SrtTranslationValidator
      * @param list<array<string, mixed>> $events
      * @param list<array{start: float, end: float, lines: list<string>}> $originalBlocks
      * @param list<array{start: float, end: float, lines: list<string>}> $translationBlocks
-     * @return array{0: list<array>, 1: array{source_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float}}
+     * @return array{0: list<array>, 1: array{source_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, identical_pairs: int, compared_pairs: int}}
      */
     private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks): array
     {
@@ -279,6 +332,8 @@ final class SrtTranslationValidator
         $driftedPairs = 0;
         $missingCaptions = 0;
         $mergedCaptions = 0;
+        $identicalPairs = 0;
+        $comparedPairs = 0;
 
         foreach ($events as $event) {
             switch ($event['kind']) {
@@ -287,6 +342,18 @@ final class SrtTranslationValidator
                     $pairs++;
                     $i = $event['source_index'];
                     $j = $event['translation_index'];
+
+                    // Verbatim-copy measurement: a pair whose translation
+                    // equals the source after normalization carried no
+                    // translation work. Pairs with no translatable text
+                    // ("...", "♪") are skipped.
+                    $sourceText = $this->normalizeForComparison(implode(' ', $originalBlocks[$i]['lines']));
+                    if ($sourceText !== '') {
+                        $comparedPairs++;
+                        if ($sourceText === $this->normalizeForComparison(implode(' ', $translationBlocks[$j]['lines']))) {
+                            $identicalPairs++;
+                        }
+                    }
 
                     if ($event['start_diff'] <= $this->timestampTolerance
                         && $event['end_diff'] <= $this->timestampTolerance) {
@@ -374,7 +441,24 @@ final class SrtTranslationValidator
             'loss_ratio' => $sourceCount > 0 ? round($missingCaptions / $sourceCount, 4) : 0.0,
             'drift_ratio' => $pairs > 0 ? round($driftedPairs / $pairs, 4) : 0.0,
             'merge_ratio' => $sourceCount > 0 ? round($mergedCaptions / $sourceCount, 4) : 0.0,
+            'identical_pairs' => $identicalPairs,
+            'compared_pairs' => $comparedPairs,
+            'verbatim_ratio' => $comparedPairs > 0 ? round($identicalPairs / $comparedPairs, 4) : 0.0,
         ]];
+    }
+
+    /**
+     * Reduces caption text to comparable characters: lowercase letters and
+     * digits only, with markup tags, brackets and punctuation stripped, so a
+     * translated line never compares equal to its source by accident.
+     */
+    private function normalizeForComparison(string $text): string
+    {
+        $text = mb_strtolower($text, 'UTF-8');
+        $text = preg_replace('/<[^>]+>/', ' ', $text);
+        $text = preg_replace('/\[[^\]]*\]/', ' ', $text);
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text);
+        return trim((string)preg_replace('/\s+/', ' ', $text));
     }
 
     /**

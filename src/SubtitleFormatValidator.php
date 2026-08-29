@@ -507,9 +507,18 @@ final class SubtitleFormatValidator
 
     private function containsArrow(string $line): bool
     {
-        return strpos($line, '-->') !== false
-            || strpos($line, '->') !== false
-            || preg_match('/\x{2192}|\x{2794}/u', $line) === 1;
+        // The canonical SRT/VTT marker always indicates a timing line.
+        if (strpos($line, '-->') !== false) {
+            return true;
+        }
+        // Looser arrow variants ("->", "→") only count as timing markers
+        // when the line also looks like a timing attempt: real timing lines
+        // carry digit:colon groups. Dialogue text may legitimately contain
+        // arrows (e.g. "TC → 阿德里安" in CJK subtitles).
+        if (strpos($line, '->') !== false || preg_match('/\x{2192}|\x{2794}/u', $line) === 1) {
+            return preg_match('/\d{1,3}:\d{2}/', $line) === 1;
+        }
+        return false;
     }
 
     /**

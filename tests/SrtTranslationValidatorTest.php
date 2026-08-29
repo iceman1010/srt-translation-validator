@@ -34,6 +34,12 @@ class SrtTranslationValidatorTest extends TestCase
         $this->assertSame(0, $result['warning_count']);
 
         foreach ($result['quality']['ratios'] as $name => $ratio) {
+            if ($name === 'verbatim_copy') {
+                // Names and short interjections legitimately stay identical
+                // across languages; only a near-total copy may fail.
+                $this->assertLessThan(0.2, $ratio, 'Verbatim share of a real translation must stay small');
+                continue;
+            }
             $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");
         }
     }
