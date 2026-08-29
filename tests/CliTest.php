@@ -25,6 +25,7 @@ class CliTest extends TestCase
         $this->fixtures['malformed'] = $this->tmp . '/malformed.srt';
         $this->fixtures['merged'] = $this->tmp . '/merged.srt';
         $this->fixtures['drifted'] = $this->tmp . '/drifted.srt';
+        $this->fixtures['scriptmix'] = $this->tmp . '/scriptmix.srt';
 
         $english = 'The quick brown fox jumps over the lazy dog near the river bank.';
         $german = 'Der schnelle braune Fuchs sprang über den faulen Hund am Flussufer.';
@@ -48,6 +49,13 @@ class CliTest extends TestCase
         $driftedLines[9] = 10 . "\n"
             . sprintf('%s --> %s', $this->tc(18.8), $this->tc(19.8)) . "\n"
             . $german . ' 10' . "\n";
+
+        // German translation with a hallucinated Cyrillic run in cue 10.
+        $scriptMixLines = $deLines;
+        $scriptMixLines[9] = 10 . "\n"
+            . sprintf('%s --> %s', $this->tc(18), $this->tc(19)) . "\n"
+            . $german . ' Привет мир' . "\n";
+        file_put_contents($this->fixtures['scriptmix'], implode("\n", $scriptMixLines));
 
         file_put_contents($this->fixtures['original'], implode("\n", $enLines));
         file_put_contents($this->fixtures['translated'], implode("\n", $deLines));
@@ -280,5 +288,56 @@ class CliTest extends TestCase
         $this->assertIsArray($data, $output);
         $this->assertArrayHasKey('error', $data);
         $this->assertStringContainsString('does not exist or is not readable', $data['error']);
+    }
+
+    public function testScriptMixFailsWithZeroTolerance(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['scriptmix'], '-l', 'de', '--json']);
+        $this->assertSame(1, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertFalse($data['valid']);
+        $this->assertArrayHasKey('unexpected_script', $data['defects_by_type']);
+        $this->assertGreaterThan(0, $data['quality']['ratios']['unexpected_script']);
+        // JSON round-trips 0.0 as int 0.
+        $this->assertEquals(0, $data['quality']['thresholds']['unexpected_script']);
+    }
+
+    public function testScriptRatioOptionRelaxesVerdict(): void
+    {
+        [$exit, $output] = $this->execute([
+            $this->fixtures['original'], $this->fixtures['scriptmix'], '-l', 'de',
+            '--max-script-ratio', '1', '--json',
+        ]);
+        $this->assertSame(0, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertTrue($data['valid']);
+        $this->assertArrayNotHasKey('unexpected_script', $data['defects_by_type']);
+    }
+
+    public function testJsonContainsReadabilityStats(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de', '--json']);
+        $this->assertSame(0, $exit, $output);
+
+        $data = json_decode($output, true);
+        $readability = $data['quality']['readability'];
+        $this->assertIsArray($readability);
+        // Whole numbers round-trip through JSON as ints.
+        $this->assertIsNumeric($readability['avg_cps']);
+        $this->assertIsNumeric($readability['max_cps']);
+        $this->assertIsInt($readability['max_cps_caption']);
+        $this->assertIsInt($readability['max_cpl']);
+        $this->assertIsInt($readability['max_cpl_caption']);
+    }
+
+    public function testReportPrintsReadabilityStats(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de']);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('reading speed:', $output);
+        $this->assertStringContainsString('line length:', $output);
+        $this->assertMatchesRegularExpression('/reading speed:\s+[\d.]+ cps avg, [\d.]+ cps max \(caption #\d+\)/', $output);
     }
 }

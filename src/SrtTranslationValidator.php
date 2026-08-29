@@ -34,9 +34,15 @@ final class SrtTranslationValidator
     private const DEFAULT_MAX_PARTIAL_RATIO = 0.05;
     private const DEFAULT_MAX_MERGE_RATIO = 0.10;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
+    /** Zero tolerance by default: any foreign-script letter is suspicious. */
+    private const DEFAULT_MAX_SCRIPT_RATIO = 0.0;
+
+    /** Minimum cue duration (seconds) a caption needs to count for CPS. */
+    private const MIN_CPS_DURATION = 0.2;
 
     private Language $languageDetector;
     private SubtitleFormatValidator $formatValidator;
+    private ScriptChecker $scriptChecker;
     private float $timestampTolerance = 0.5;
 
     private float $maxLossRatio = self::DEFAULT_MAX_LOSS_RATIO;
@@ -44,6 +50,7 @@ final class SrtTranslationValidator
     private float $maxPartialRatio = self::DEFAULT_MAX_PARTIAL_RATIO;
     private float $maxMergeRatio = self::DEFAULT_MAX_MERGE_RATIO;
     private float $maxVerbatimRatio = self::DEFAULT_MAX_VERBATIM_RATIO;
+    private float $maxScriptRatio = self::DEFAULT_MAX_SCRIPT_RATIO;
     /** null = no error-count gate (ratio thresholds decide alone). */
     private ?int $maxErrors = null;
     private bool $strict = false;
@@ -59,6 +66,7 @@ final class SrtTranslationValidator
     {
         $this->languageDetector = $languageDetector ?? new Language();
         $this->formatValidator = new SubtitleFormatValidator();
+        $this->scriptChecker = new ScriptChecker();
     }
 
     public function setTimestampTolerance(float $seconds): void
@@ -105,6 +113,13 @@ final class SrtTranslationValidator
     {
         if ($ratio !== null) {
             $this->maxVerbatimRatio = $ratio;
+        }
+    }
+
+    public function setMaxScriptRatio(?float $ratio): void
+    {
+        if ($ratio !== null) {
+            $this->maxScriptRatio = $ratio;
         }
     }
 
@@ -204,6 +219,38 @@ final class SrtTranslationValidator
             ];
         }
 
+        $script = $this->scriptChecker->check($translationBlocks, $expectedLanguage, $originalBlocks);
+        $scriptRatio = ($script !== null && $script['letters'] > 0)
+            ? round($script['foreign_chars'] / $script['letters'], 4)
+            : 0.0;
+
+        if ($script !== null && $scriptRatio > $this->maxScriptRatio) {
+            $scriptSummary = implode(', ', array_map(
+                static fn (string $name, int $count): string => "{$name} ({$count})",
+                array_keys($script['scripts']),
+                $script['scripts']
+            ));
+            $defects[] = [
+                'type' => 'unexpected_script',
+                'severity' => 'error',
+                'message' => sprintf(
+                    '%d of %d letters (%.2f%%) are written in a script that does not belong to language %s: %s. Example characters: %s',
+                    $script['foreign_chars'],
+                    $script['letters'],
+                    $scriptRatio * 100,
+                    $expectedLanguage,
+                    $scriptSummary,
+                    implode(' ', $script['examples'])
+                ),
+                'foreign_chars' => $script['foreign_chars'],
+                'total_letters' => $script['letters'],
+                'scripts' => $script['scripts'],
+                'examples' => implode(' ', $script['examples']),
+                'language' => $expectedLanguage,
+                'ratio' => $scriptRatio
+            ];
+        }
+
         return $this->buildResult($defects, [
             'source_captions' => $stats['source_captions'],
             'aligned_pairs' => $stats['aligned_pairs'],
@@ -216,6 +263,7 @@ final class SrtTranslationValidator
                     : 0.0,
                 'merged' => $stats['merge_ratio'],
                 'verbatim_copy' => $stats['verbatim_ratio'],
+                'unexpected_script' => $scriptRatio,
                 'unaligned' => $stats['source_captions'] > 0
                     ? round(1 - $stats['aligned_pairs'] / $stats['source_captions'], 4)
                     : 0.0,
@@ -226,8 +274,12 @@ final class SrtTranslationValidator
                 'partial_translation' => $this->maxPartialRatio,
                 'merged' => $this->maxMergeRatio,
                 'verbatim_copy' => $this->maxVerbatimRatio,
+                'unexpected_script' => $this->maxScriptRatio,
                 'unaligned' => null,
             ],
+            // Reading-speed and line-length statistics: informational only,
+            // they never produce defects or influence the verdict.
+            'readability' => $this->readabilityStats($translationBlocks),
             'max_errors' => $this->maxErrors,
             'strict' => $this->strict,
         ]);
@@ -552,6 +604,56 @@ final class SrtTranslationValidator
         }
 
         return ['defects' => $defects, 'wrong_chars' => $wrongChars, 'analyzed_chars' => $analyzedChars];
+    }
+
+    /**
+     * Reading-speed and line-length statistics over the translation cues.
+     * Purely informational: the values are reported in the quality block but
+     * never generate defects or affect the verdict.
+     *
+     * @param list<array{start: float, end: float, lines: list<string>}> $blocks
+     * @return array{avg_cps: float, max_cps: float, max_cps_caption: int|null, max_cpl: int, max_cpl_caption: int|null}
+     */
+    private function readabilityStats(array $blocks): array
+    {
+        $totalChars = 0;
+        $totalDuration = 0.0;
+        $maxCps = 0.0;
+        $maxCpsCaption = null;
+        $maxCpl = 0;
+        $maxCplCaption = null;
+
+        foreach ($blocks as $index => $block) {
+            foreach ($block['lines'] as $line) {
+                $length = mb_strlen($line);
+                if ($length > $maxCpl) {
+                    $maxCpl = $length;
+                    $maxCplCaption = $index + 1;
+                }
+            }
+
+            $chars = mb_strlen(implode(' ', $block['lines']));
+            $duration = $block['end'] - $block['start'];
+            if ($chars === 0 || $duration < self::MIN_CPS_DURATION) {
+                continue;
+            }
+
+            $cps = $chars / $duration;
+            $totalChars += $chars;
+            $totalDuration += $duration;
+            if ($cps > $maxCps) {
+                $maxCps = $cps;
+                $maxCpsCaption = $index + 1;
+            }
+        }
+
+        return [
+            'avg_cps' => $totalDuration > 0 ? round($totalChars / $totalDuration, 1) : 0.0,
+            'max_cps' => round($maxCps, 1),
+            'max_cps_caption' => $maxCpsCaption,
+            'max_cpl' => $maxCpl,
+            'max_cpl_caption' => $maxCplCaption,
+        ];
     }
 
     /**

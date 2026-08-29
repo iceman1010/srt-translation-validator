@@ -6,13 +6,17 @@ timeline and reports these defect types:
 
 | Defect                | Severity | What it detects                                                          |
 | --------------------- | -------- | ------------------------------------------------------------------------ |
-| `invalid_format`      | error    | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage) |
+| `invalid_format`      | error    | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage, NUL bytes) |
 | `missing_caption`     | error    | Source captions with no translation counterpart at all (real content loss) |
 | `partial_translation` | error    | Large caption blocks detected in the wrong language (e.g. left untranslated) |
 | `timestamp_mismatch`  | error    | Aligned captions whose start/end times drifted beyond a tolerance       |
+| `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source (no translation happened) |
+| `unexpected_script`   | error    | Translation letters in a script foreign to the target language (character hallucination, e.g. Cyrillic in Hungarian); letters already spelled that way in the source are exempt |
 | `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
 | `split_captions`      | warning  | One source caption split across multiple translation captions           |
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
+| `format_mismatch`     | warning  | Source and translation use different container formats (compared on cue structure anyway) |
+| `source_parse_failed` | warning  | The source file itself is malformed; the translation verdict is skipped  |
 
 ## The verdict: "usable", not "identical"
 
@@ -29,6 +33,8 @@ then judges the translation by how much is actually wrong:
 | `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
 | `partial_translation`| translation characters detected in the wrong language | 5%            |
 | `merged`             | source captions merged into neighbouring captions    | 10%           |
+| `verbatim_copy`      | aligned captions identical to the source             | 50%           |
+| `unexpected_script`  | translation letters in a foreign script (not counting letters inherited from the source) | 0% (zero tolerance) |
 
 - A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
   its limit. Merges and splits are always reported as warnings and never fail
@@ -37,7 +43,16 @@ then judges the translation by how much is actually wrong:
 - The measured ratios are always included in the report (`quality` block), so
   thresholds can be calibrated from real data. Each limit can be overridden
   per run with `--max-loss-ratio`, `--max-drift-ratio`,
-  `--max-partial-ratio` and `--max-merge-ratio` (values between `0` and `1`).
+  `--max-partial-ratio`, `--max-merge-ratio`, `--max-verbatim-ratio` and
+  `--max-script-ratio` (values between `0` and `1`); `--max-errors` fails a
+  run with more than N error-severity defects regardless of the ratios.
+- **Source vs. model**: the translation is the artefact under review, so
+  format failures in the translation fail the job. A malformed *source* is
+  the user's input, not the model's failure: it is reported as a
+  `source_parse_failed` warning and the verdict is skipped, never failed.
+- Reading speed (cps) and line length are measured on the translation and
+  reported in the `quality.readability` block (avg/max cps, longest line) as
+  pure statistics - they never produce defects or affect the verdict.
 
 This project is used in two different ways, so this README is split in two:
 
@@ -93,6 +108,9 @@ compares them, and prints a human-readable report.
 | `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). |
 | `--max-partial-ratio=F`| Max share of translation chars in the wrong language (default: `0.05`).  |
 | `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions (default: `0.10`). |
+| `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
+| `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
+| `--max-errors=N`       | Fail when more than N error-severity defects are found, regardless of the ratios (default: no limit). |
 | `-h, --help`           | Show usage help.                                                         |
 | `-V, --version`        | Print the version and exit.                                              |
 | `--update[=version]`   | Update the tool to the latest release (or a specific version, e.g. `--update=1.0.1`). |
@@ -160,13 +178,26 @@ reported as `{"error": "..."}` with exit code `2`.
             "content_loss": 0.0,
             "timestamp_drift": 0.0,
             "partial_translation": 0.0,
-            "merged": 0.0052
+            "merged": 0.0052,
+            "verbatim_copy": 0.0026,
+            "unexpected_script": 0.0,
+            "unaligned": 0.0052
         },
         "thresholds": {
             "content_loss": 0.01,
             "timestamp_drift": 0.02,
             "partial_translation": 0.05,
-            "merged": 0.1
+            "merged": 0.1,
+            "verbatim_copy": 0.5,
+            "unexpected_script": 0.0,
+            "unaligned": null
+        },
+        "readability": {
+            "avg_cps": 12.4,
+            "max_cps": 21.7,
+            "max_cps_caption": 183,
+            "max_cpl": 42,
+            "max_cpl_caption": 402
         },
         "strict": false,
         "reasons": []
@@ -190,11 +221,16 @@ limit (e.g. `"partial translation 45.35% exceeds the threshold 5.00%"`).
   Timestamp tolerance: 0.5s
 
   Quality
-------------------------------------------------------------------
+  ------------------------------------------------------------------
   content loss:         0.0%  (max 1.0%)
   timestamp drift:      0.0%  (max 2.0%)
   partial translation:   0.0%  (max 5.0%)
   merged:               0.5%  (max 10.0%)
+  verbatim copy:        0.3%  (max 50.0%)
+  unexpected script:    0.0%  (max 0.0%)
+  unaligned:            0.5%  (advisory)
+  reading speed:      12.4 cps avg, 21.7 cps max (caption #183)
+  line length:        42 chars max (caption #402)
 
   Defects (4)
 ------------------------------------------------------------------
@@ -263,11 +299,19 @@ $validator->setTimestampTolerance(0.2);
 // Fail on any error-severity defect instead of judging by ratios
 $validator->setStrict(true);
 
-// Override any quality threshold (defaults: 0.01 / 0.02 / 0.05 / 0.10)
+// Override any quality threshold
+// (defaults: loss 0.01 / drift 0.02 / partial 0.05 / merge 0.10 /
+//  verbatim 0.50 / script 0.00)
 $validator->setMaxLossRatio(0.02);
 $validator->setMaxDriftRatio(0.05);
 $validator->setMaxPartialRatio(0.10);
 $validator->setMaxMergeRatio(0.20);
+$validator->setMaxVerbatimRatio(0.60);
+$validator->setMaxScriptRatio(0.001);
+
+// Fail when more than N error-severity defects are found,
+// regardless of the ratios
+$validator->setMaxErrors(10);
 
 $result = $validator->validate(
     'path/to/original.srt',   // reference subtitles
@@ -341,6 +385,17 @@ foreach ($result['defects'] as $i => $defect) {
             'subtype'  => 'missing_timestamp',
             'message'  => 'Line 2112: expected a timing line (...) ...',
         ],
+        [
+            'type'     => 'unexpected_script',
+            'severity' => 'error',
+            'message'  => '42 of 18355 letters (0.23%) are written in a script that does not belong to language hu: cyrillic (42). Example characters: д л о',
+            'foreign_chars' => 42,
+            'total_letters' => 18355,
+            'scripts'      => ['cyrillic' => 42],
+            'examples'     => 'д л о',
+            'language'     => 'hu',
+            'ratio'        => 0.0023,
+        ],
     ],
     'quality' => [
         'source_captions' => 1834,
@@ -350,13 +405,28 @@ foreach ($result['defects'] as $i => $defect) {
             'timestamp_drift'     => 0.0,
             'partial_translation' => 0.0,
             'merged'              => 0.006,
+            'verbatim_copy'       => 0.0026,
+            'unexpected_script'   => 0.0,
+            'unaligned'           => 0.0142,   // advisory, no threshold
         ],
         'thresholds' => [
             'content_loss'        => 0.01,
             'timestamp_drift'     => 0.02,
             'partial_translation' => 0.05,
             'merged'              => 0.10,
+            'verbatim_copy'       => 0.50,
+            'unexpected_script'   => 0.0,
+            'unaligned'           => null,
         ],
+        // Informational reading statistics - never affect the verdict
+        'readability' => [
+            'avg_cps'         => 12.4,
+            'max_cps'         => 21.7,
+            'max_cps_caption' => 183,
+            'max_cpl'         => 42,
+            'max_cpl_caption' => 402,
+        ],
+        'max_errors' => null,
         'strict'  => false,
         'reasons' => ['content loss 1.36% exceeds the threshold 1.00%'],
     ],
@@ -465,6 +535,8 @@ can force a rebuild of the current version at any time.)
 src/                          Library classes (PSR-4: SrtValidator\)
   SrtTranslationValidator.php Full translation validation logic
   SubtitleFormatValidator.php Regex-based SRT/WebVTT structure validation
+  CaptionAligner.php          Aligns source/translation captions on the timeline
+  ScriptChecker.php           Foreign-script ("character hallucination") detection
   Cli.php                     CLI parsing, report rendering, --version/--update
 bin/srt-validator             Executable command-line entry point
 build/build-phar.php          PHAR builder (embeds VERSION + release repo)
@@ -472,5 +544,5 @@ VERSION                       Current release version (drives the GitHub release
 examples/                     Local (gitignored) example fixtures + defect files
 tests/                        PHPUnit test suite
 .github/workflows/            CI + release workflow
-AGENTS.md                     Workflow rules for AI agents (version bumping)
+AGENTS.md                     Workflow rules for AI agents (git/VERSION are user-owned)
 ```

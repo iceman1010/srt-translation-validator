@@ -73,6 +73,7 @@ final class Cli
         $validator->setMaxPartialRatio($options['max_partial_ratio']);
         $validator->setMaxMergeRatio($options['max_merge_ratio']);
         $validator->setMaxVerbatimRatio($options['max_verbatim_ratio']);
+        $validator->setMaxScriptRatio($options['max_script_ratio']);
         $validator->setMaxErrors($options['max_errors']);
 
         $result = $validator->validate($original, $translation, $lang);
@@ -261,12 +262,16 @@ OPTIONS:
        --max-merge-ratio=F    Max share of source captions merged into
                                neighbouring translation captions
                                (default: 0.10).
-       --max-verbatim-ratio=F Max share of aligned captions that may be
-                               verbatim copies of the source, i.e. no
-                               translation happened (default: 0.50).
-       --max-errors=N         Fail when more than N error-severity defects
-                               are found, regardless of the ratios
-                               (default: no limit).
+        --max-verbatim-ratio=F Max share of aligned captions that may be
+                                verbatim copies of the source, i.e. no
+                                translation happened (default: 0.50).
+        --max-script-ratio=F   Max share of translation letters that may be
+                                written in a script foreign to the target
+                                language, e.g. Cyrillic in Hungarian
+                                (default: 0, zero tolerance).
+        --max-errors=N         Fail when more than N error-severity defects
+                                are found, regardless of the ratios
+                                (default: no limit).
   -h, --help          Show this help.
   -V, --version       Print the version and exit.
       --update[=ver]  Self-update the PHAR to the latest release (or to the
@@ -305,6 +310,7 @@ TXT;
             'max_partial_ratio' => null,
             'max_merge_ratio' => null,
             'max_verbatim_ratio' => null,
+            'max_script_ratio' => null,
             'max_errors' => null,
             'files' => [],
         ];
@@ -351,6 +357,7 @@ TXT;
                 '--max-partial-ratio' => 'max_partial_ratio',
                 '--max-merge-ratio' => 'max_merge_ratio',
                 '--max-verbatim-ratio' => 'max_verbatim_ratio',
+                '--max-script-ratio' => 'max_script_ratio',
             ];
             if (isset($ratioOptions[$arg])) {
                 $value = $normalized[++$i] ?? '';
@@ -581,6 +588,22 @@ TXT;
             $maxErrors = $result['quality']['max_errors'] ?? null;
             if ($maxErrors !== null) {
                 $out .= sprintf('  %-19s %d' . "\n", 'error limit:', $maxErrors);
+            }
+            $readability = $result['quality']['readability'] ?? null;
+            if ($readability !== null) {
+                $out .= sprintf(
+                    '  %-19s %.1f cps avg, %.1f cps max (caption #%d)' . "\n",
+                    'reading speed:',
+                    $readability['avg_cps'],
+                    $readability['max_cps'],
+                    $readability['max_cps_caption']
+                );
+                $out .= sprintf(
+                    '  %-19s %d chars max (caption #%d)' . "\n",
+                    'line length:',
+                    $readability['max_cpl'],
+                    $readability['max_cpl_caption']
+                );
             }
             $out .= "\n";
         }
