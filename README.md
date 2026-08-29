@@ -1,14 +1,43 @@
 # SRT Translation Validator
 
 A PHP tool that validates subtitle translations. It compares an **original**
-subtitle file against its **translation** and reports four kinds of defects:
+subtitle file against its **translation**, aligns the two caption lists on the
+timeline and reports these defect types:
 
-| Defect                | What it detects                                                          |
-| --------------------- | ------------------------------------------------------------------------ |
-| `invalid_format`      | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage) |
-| `missing_parts`       | Captions present in the original but absent in the translation           |
-| `partial_translation` | Large caption blocks detected in the wrong language (e.g. left untranslated) |
-| `timestamp_mismatch`  | Captions whose start/end times drifted beyond a tolerance                |
+| Defect                | Severity | What it detects                                                          |
+| --------------------- | -------- | ------------------------------------------------------------------------ |
+| `invalid_format`      | error    | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage) |
+| `missing_caption`     | error    | Source captions with no translation counterpart at all (real content loss) |
+| `partial_translation` | error    | Large caption blocks detected in the wrong language (e.g. left untranslated) |
+| `timestamp_mismatch`  | error    | Aligned captions whose start/end times drifted beyond a tolerance       |
+| `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
+| `split_captions`      | warning  | One source caption split across multiple translation captions           |
+| `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
+
+## The verdict: "usable", not "identical"
+
+Translation engines like DeepL routinely **re-segment** subtitles: they merge
+2-3 short source captions into one translation caption (or split long ones),
+which changes the caption count without losing any content. An index-by-index
+comparison misreads that as hundreds of timestamp mismatches and missing
+captions. This validator instead **aligns captions on the timeline** first,
+then judges the translation by how much is actually wrong:
+
+| Ratio                | Measures                                             | Default limit |
+| -------------------- | ---------------------------------------------------- | ------------- |
+| `content_loss`       | source captions with no translation counterpart      | 1%            |
+| `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
+| `partial_translation`| translation characters detected in the wrong language | 5%            |
+| `merged`             | source captions merged into neighbouring captions    | 10%           |
+
+- A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
+  its limit. Merges and splits are always reported as warnings and never fail
+  on their own.
+- `--strict` fails on any error-severity defect, ignoring the limits.
+- The measured ratios are always included in the report (`quality` block), so
+  thresholds can be calibrated from real data. Each limit can be overridden
+  per run with `--max-loss-ratio`, `--max-drift-ratio`,
+  `--max-partial-ratio` and `--max-merge-ratio` (values between `0` and `1`).
 
 This project is used in two different ways, so this README is split in two:
 
@@ -59,6 +88,11 @@ compares them, and prints a human-readable report.
 | `-l, --lang=CODE`      | Expected language of the translation (ISO 639-1, e.g. `de`). Default: auto-detected from the translation text. |
 | `-t, --tolerance=SEC`  | Timestamp drift tolerance in seconds (default: `0.5`).                   |
 | `-j, --json`           | Print the report as JSON (for scripts, agents and LLMs). Exit codes are unchanged. |
+| `--strict`             | Fail on any error-severity defect, ignoring the quality-ratio limits.    |
+| `--max-loss-ratio=F`   | Max share of source captions with no translation at all (default: `0.01`). |
+| `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). |
+| `--max-partial-ratio=F`| Max share of translation chars in the wrong language (default: `0.05`).  |
+| `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions (default: `0.10`). |
 | `-h, --help`           | Show usage help.                                                         |
 | `-V, --version`        | Print the version and exit.                                              |
 | `--update[=version]`   | Update the tool to the latest release (or a specific version, e.g. `--update=1.0.1`). |
@@ -67,8 +101,8 @@ compares them, and prints a human-readable report.
 
 | Code | Meaning                                                     |
 | ---- | ----------------------------------------------------------- |
-| `0`  | The translation is valid (no defects found).                 |
-| `1`  | Defects were found – the translation is invalid.             |
+| `0`  | The translation is usable (no quality limit exceeded).       |
+| `1`  | The translation is not usable (a limit was exceeded, or errors in `--strict` mode). |
 | `2`  | Usage error, or the validator could not run.                 |
 
 ### Examples
@@ -95,31 +129,53 @@ reported as `{"error": "..."}` with exit code `2`.
 
 ```json
 {
-    "valid": false,
-    "result": "failed",
+    "valid": true,
+    "result": "passed",
     "original": "original.srt",
     "translation": "translation.srt",
     "language": "de",
     "timestamp_tolerance": 0.5,
     "defect_count": 2,
+    "error_count": 0,
+    "warning_count": 2,
     "defects_by_type": {
-        "missing_caption": 1,
-        "missing_parts": 1
+        "merged_captions": 2
     },
     "defects": [
         {
-            "type": "missing_parts",
-            "message": "Translation has 24 captions, original has 25. Missing 1 captions."
-        },
-        {
-            "type": "missing_caption",
-            "message": "Caption #25 is missing in translation",
-            "caption_number": 25,
-            "original_text": "English movie line number 25."
+            "type": "merged_captions",
+            "severity": "warning",
+            "message": "Original captions #316-317 are merged into translation caption #316",
+            "source_start_caption": 316,
+            "source_end_caption": 317,
+            "translation_caption": 316,
+            "caption_count": 2
         }
-    ]
+    ],
+    "quality": {
+        "source_captions": 765,
+        "aligned_pairs": 761,
+        "partial_chars_analyzed": 18220,
+        "ratios": {
+            "content_loss": 0.0,
+            "timestamp_drift": 0.0,
+            "partial_translation": 0.0,
+            "merged": 0.0052
+        },
+        "thresholds": {
+            "content_loss": 0.01,
+            "timestamp_drift": 0.02,
+            "partial_translation": 0.05,
+            "merged": 0.1
+        },
+        "strict": false,
+        "reasons": []
+    }
 }
 ```
+
+`valid: false` reports carry non-empty `quality.reasons` naming every exceeded
+limit (e.g. `"partial translation 45.35% exceeds the threshold 5.00%"`).
 
 ### Example report
 
@@ -128,28 +184,33 @@ reported as `{"error": "..."}` with exit code `2`.
   Subtitle Translation Validator
 ==================================================================
 
-  Original:           examples/The.Matrix.1999.Tubi.CC.en.srt
-  Translation:        examples/defect_timestamp_mismatch.de.srt
-  Expected language:  de
+  Original:           original.srt
+  Translation:        translation.nl.srt
+  Expected language:  nl
   Timestamp tolerance: 0.5s
 
-  Defects (20)
+  Quality
+------------------------------------------------------------------
+  content loss:         0.0%  (max 1.0%)
+  timestamp drift:      0.0%  (max 2.0%)
+  partial translation:   0.0%  (max 5.0%)
+  merged:               0.5%  (max 10.0%)
+
+  Defects (4)
 ------------------------------------------------------------------
 
-  1. TIMESTAMP MISMATCH [caption #301]
-Caption #301 has timestamp drift
-original   : 00:22:08,627 --> 00:22:14,066
-translation: 00:22:10,627 --> 00:22:16,066
-drift      : start +2.000s, end +2.000s
+  1. MERGED CAPTIONS [warning]
+Original captions #316 are merged into translation caption #316
 
   ...
 
 ==================================================================
-  RESULT: FAILED - 20 defect(s) found
+  RESULT: PASSED - translation is usable (0 error(s), 4 warning(s) within limits)
 ==================================================================
 ```
 
-A valid translation prints `RESULT: PASSED` and exits `0`.
+A failed validation prints `RESULT: FAILED`, the error/warning counts and one
+line per exceeded quality limit.
 
 ## Updating the tool
 
@@ -199,6 +260,15 @@ $validator = new SrtTranslationValidator();
 // Tune timestamp drift tolerance (default is 0.5 seconds)
 $validator->setTimestampTolerance(0.2);
 
+// Fail on any error-severity defect instead of judging by ratios
+$validator->setStrict(true);
+
+// Override any quality threshold (defaults: 0.01 / 0.02 / 0.05 / 0.10)
+$validator->setMaxLossRatio(0.02);
+$validator->setMaxDriftRatio(0.05);
+$validator->setMaxPartialRatio(0.10);
+$validator->setMaxMergeRatio(0.20);
+
 $result = $validator->validate(
     'path/to/original.srt',   // reference subtitles
     'path/to/translation.srt', // the translation being checked
@@ -222,43 +292,81 @@ foreach ($result['defects'] as $i => $defect) {
 
 ### Result structure
 
-The `defects` array returned by `validate()` looks like this:
+`validate()` returns a verdict plus every defect, each tagged with a severity:
 
 ```php
 [
-    'valid'   => false,
+    'valid'   => false,          // "usable": no quality ratio exceeded
+    'error_count'   => 26,
+    'warning_count' => 11,
     'defects' => [
         [
-            'type'    => 'missing_caption',
-            'message' => 'Caption #505 is missing in translation',
-            'caption_number' => 505,
-            'original_text' => 'Neo?',
+            'type'     => 'missing_caption',
+            'severity' => 'error',
+            'message'  => 'Caption #1178 is missing in translation',
+            'caption_number' => 1178,
+            'original_text' => 'We need to go now.',
         ],
         [
-            'type'    => 'partial_translation',
-            'message' => 'Large block (captions 901-1400) detected as en instead of de - ...',
+            'type'     => 'merged_captions',
+            'severity' => 'warning',
+            'message'  => 'Original captions #316-317 are merged into translation caption #316',
+            'source_start_caption' => 316,
+            'source_end_caption'   => 317,
+            'translation_caption' => 316,
+            'caption_count' => 2,
+        ],
+        [
+            'type'     => 'partial_translation',
+            'severity' => 'error',
+            'message'  => 'Large block (captions 901-1400) detected as en instead of de - ...',
             'start_caption' => 901,
             'end_caption'   => 1400,
             'detected_language' => 'en',
             'confidence'    => 0.88,
         ],
         [
-            'type'    => 'timestamp_mismatch',
+            'type'     => 'timestamp_mismatch',
+            'severity' => 'error',
             'caption_number' => 301,
-            'message' => 'Caption #301 has timestamp drift',
+            'message'  => 'Caption #301 has timestamp drift',
             'original_start'     => 1334.627,
             'translation_start'  => 1336.627,
             'start_diff' => 2.0,
         ],
         [
-            'type'    => 'invalid_format',
-            'line'    => 2112,
-            'subtype' => 'missing_timestamp',
-            'message' => 'Line 2112: expected a timing line (...) ...',
+            'type'     => 'invalid_format',
+            'severity' => 'error',
+            'line'     => 2112,
+            'subtype'  => 'missing_timestamp',
+            'message'  => 'Line 2112: expected a timing line (...) ...',
         ],
+    ],
+    'quality' => [
+        'source_captions' => 1834,
+        'aligned_pairs'   => 1808,
+        'ratios' => [
+            'content_loss'        => 0.0136,   // vs thresholds below
+            'timestamp_drift'     => 0.0,
+            'partial_translation' => 0.0,
+            'merged'              => 0.006,
+        ],
+        'thresholds' => [
+            'content_loss'        => 0.01,
+            'timestamp_drift'     => 0.02,
+            'partial_translation' => 0.05,
+            'merged'              => 0.10,
+        ],
+        'strict'  => false,
+        'reasons' => ['content loss 1.36% exceeds the threshold 1.00%'],
     ],
 ]
 ```
+
+The captions are aligned on the timeline before comparison (see
+`src/CaptionAligner.php`), so re-segmentation by the translation engine is
+reported as `merged_captions`/`split_captions` warnings instead of cascades
+of false mismatches.
 
 ## Validation of file format only
 

@@ -30,46 +30,130 @@ class SrtTranslationValidatorTest extends TestCase
 
         $this->assertTrue($result['valid'], 'Valid translation should pass validation');
         $this->assertEmpty($result['defects'], 'Valid translation should have no defects');
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame(0, $result['warning_count']);
+
+        foreach ($result['quality']['ratios'] as $name => $ratio) {
+            $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");
+        }
     }
 
-    public function testMissingPartsDefect()
+    public function testMissingCaptionsDefect()
     {
         $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
         $translationPath = $this->examplesDir . 'defect_missing_parts.de.srt';
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], 'Missing parts should fail validation');
+        $this->assertFalse($result['valid'], '25 missing captions (1.36%) should fail validation');
 
-        $missingPartsDefects = array_filter($result['defects'], function($defect) {
-            return $defect['type'] === 'missing_parts' || $defect['type'] === 'missing_caption';
+        $missing = array_filter($result['defects'], function ($defect) {
+            return $defect['type'] === 'missing_caption';
         });
 
-        $this->assertNotEmpty($missingPartsDefects, 'Should detect missing captions');
-        $this->assertGreaterThan(5, count($missingPartsDefects), 'Should detect at least 6 missing captions');
+        $this->assertCount(25, $missing);
+        $this->assertSame(25, $result['error_count']);
+        $this->assertEqualsWithDelta(0.0136, $result['quality']['ratios']['content_loss'], 0.0005);
+
+        // The removed captions sit in the middle of the file, so nothing
+        // may be reported as merged.
+        $this->assertCount(0, array_filter($result['defects'], fn ($d) => $d['type'] === 'merged_captions'));
     }
 
-    public function testTimestampMismatchDefect()
+    public function testTimestampDriftIsUsableWithinThreshold()
     {
+        // 20 shifted captions out of 1834 (~1% drift) stay within the 2%
+        // threshold: the translation is reported as usable, with the
+        // individual drift defects still listed for inspection.
         $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
         $translationPath = $this->examplesDir . 'defect_timestamp_mismatch.de.srt';
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], 'Timestamp mismatch should fail validation');
+        $this->assertTrue($result['valid'], 'Drift within the threshold should stay usable');
+        $this->assertGreaterThanOrEqual(15, $result['error_count']);
 
-        $timestampDefects = array_filter($result['defects'], function($defect) {
-            return $defect['type'] === 'timestamp_mismatch';
-        });
+        $drifts = array_filter($result['defects'], fn ($d) => $d['type'] === 'timestamp_mismatch');
+        $this->assertNotEmpty($drifts);
+        $this->assertLessThanOrEqual(25, count($drifts));
 
-        $this->assertNotEmpty($timestampDefects, 'Should detect timestamp mismatches');
-        $this->assertEquals(20, count($timestampDefects), 'Should detect exactly 20 timestamp mismatches');
+        foreach ($drifts as $defect) {
+            $this->assertSame('error', $defect['severity']);
+            // The shift was applied around captions 301-320; the alignment
+            // may displace the attribution by a cue or two.
+            $this->assertGreaterThanOrEqual(295, $defect['caption_number']);
+            $this->assertLessThanOrEqual(325, $defect['caption_number']);
+        }
+    }
 
-        foreach ($timestampDefects as $defect) {
-            $this->assertEquals(2.0, $defect['start_diff'], 'Start drift should be 2.0 seconds');
-            $this->assertTrue($defect['end_diff'] >= 0, 'End drift should be non-negative');
-            $this->assertGreaterThanOrEqual(301, $defect['caption_number'], 'Should detect captions starting from 301');
-            $this->assertLessThanOrEqual(320, $defect['caption_number'], 'Should detect captions up to 320');
+    public function testTimestampDriftFailsInStrictMode()
+    {
+        $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
+        $translationPath = $this->examplesDir . 'defect_timestamp_mismatch.de.srt';
+
+        $this->validator->setStrict(true);
+        $result = $this->validator->validate($originalPath, $translationPath, 'de');
+
+        $this->assertFalse($result['valid'], 'Strict mode must fail on any error-severity defect');
+        $this->assertStringContainsString('strict mode', implode(' ', $result['quality']['reasons']));
+    }
+
+    public function testTimestampDriftFailsBelowOverrideThreshold()
+    {
+        $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
+        $translationPath = $this->examplesDir . 'defect_timestamp_mismatch.de.srt';
+
+        $this->validator->setMaxDriftRatio(0.005);
+        $result = $this->validator->validate($originalPath, $translationPath, 'de');
+
+        $this->assertFalse($result['valid'], 'A stricter threshold must flip the verdict');
+        $this->assertStringContainsString('timestamp drift', implode(' ', $result['quality']['reasons']));
+    }
+
+    public function testThresholdOverrideCanFlipVerdictToUsable()
+    {
+        $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
+        $translationPath = $this->examplesDir . 'defect_missing_parts.de.srt';
+
+        $this->validator->setMaxLossRatio(0.02);
+        $result = $this->validator->validate($originalPath, $translationPath, 'de');
+
+        $this->assertTrue($result['valid'], '1.36% loss is tolerable with a 2% threshold');
+        $this->assertSame(25, $result['error_count'], 'The defects are still reported');
+    }
+
+    public function testMergedCaptionsAreWarnings()
+    {
+        // Simulate DeepL-style re-segmentation: remove single captions from
+        // the middle of an otherwise perfect translation. The surrounding
+        // cues still anchor exactly, so the holes are merges, not loss.
+        $original = Done\Subtitles\Subtitles::loadFromFile(
+            $this->examplesDir . 'The.Matrix.1999.Tubi.CC.de.srt'
+        );
+        $blocks = $original->getInternalFormat();
+        unset($blocks[600], $blocks[1000]);
+        $original->setInternalFormat(array_values($blocks));
+        $mergedPath = $this->examplesDir . 'tmp_merged.de.srt';
+        $original->save($mergedPath);
+
+        try {
+            $result = $this->validator->validate(
+                $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt',
+                $mergedPath,
+                'de'
+            );
+
+            $this->assertTrue($result['valid'], 'Harmless re-segmentation must stay usable');
+            $this->assertSame(0, $result['error_count']);
+            $this->assertSame(2, $result['warning_count']);
+
+            $merges = array_filter($result['defects'], fn ($d) => $d['type'] === 'merged_captions');
+            $this->assertCount(2, $merges);
+            foreach ($merges as $defect) {
+                $this->assertSame('warning', $defect['severity']);
+            }
+        } finally {
+            @unlink($mergedPath);
         }
     }
 
@@ -93,13 +177,18 @@ class SrtTranslationValidatorTest extends TestCase
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], 'Partial translation should fail validation');
+        $this->assertFalse($result['valid'], 'Half the file in English should fail validation');
 
-        $partialTranslationDefects = array_filter($result['defects'], function($defect) {
+        $partialTranslationDefects = array_filter($result['defects'], function ($defect) {
             return $defect['type'] === 'partial_translation';
         });
 
         $this->assertNotEmpty($partialTranslationDefects, 'Should detect partial translation defects');
+        $this->assertGreaterThan(
+            0.05,
+            $result['quality']['ratios']['partial_translation'],
+            'The wrong-language ratio should exceed the threshold'
+        );
     }
 
     public function testNonExistentFiles()
@@ -123,13 +212,13 @@ class SrtTranslationValidatorTest extends TestCase
 
         $this->assertFalse($result['valid'], 'Invalid format should fail validation');
 
-        $invalidFormatDefects = array_filter($result['defects'], function($defect) {
+        $invalidFormatDefects = array_filter($result['defects'], function ($defect) {
             return $defect['type'] === 'invalid_format';
         });
 
         $this->assertNotEmpty($invalidFormatDefects, 'Should detect invalid format defects');
 
-        $subtypes = array_map(function($defect) {
+        $subtypes = array_map(function ($defect) {
             return $defect['subtype'] ?? 'unknown';
         }, $invalidFormatDefects);
 

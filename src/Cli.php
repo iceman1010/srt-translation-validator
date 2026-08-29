@@ -67,6 +67,11 @@ final class Cli
 
         $validator = new SrtTranslationValidator($detector);
         $validator->setTimestampTolerance($options['tolerance']);
+        $validator->setStrict($options['strict']);
+        $validator->setMaxLossRatio($options['max_loss_ratio']);
+        $validator->setMaxDriftRatio($options['max_drift_ratio']);
+        $validator->setMaxPartialRatio($options['max_partial_ratio']);
+        $validator->setMaxMergeRatio($options['max_merge_ratio']);
 
         $result = $validator->validate($original, $translation, $lang);
 
@@ -243,14 +248,30 @@ OPTIONS:
   -t, --tolerance=SEC Timestamp drift tolerance in seconds (default: 0.5).
   -j, --json          Output the report as JSON (machine-readable, for
                       scripts, agents and LLMs). Exit codes are unchanged.
+      --strict        Fail on any error-severity defect, ignoring the
+                      quality-ratio thresholds below.
+      --max-loss-ratio=F      Max share of source captions with no
+                              translation at all (default: 0.01).
+      --max-drift-ratio=F    Max share of aligned captions with timestamp
+                              drift beyond the tolerance (default: 0.02).
+      --max-partial-ratio=F  Max share of translation chars detected in the
+                              wrong language (default: 0.05).
+      --max-merge-ratio=F    Max share of source captions merged into
+                              neighbouring translation captions
+                              (default: 0.10).
   -h, --help          Show this help.
   -V, --version       Print the version and exit.
       --update[=ver]  Self-update the PHAR to the latest release (or to the
                       given version, e.g. --update=1.0.1). PHAR build only.
 
+The verdict answers "is this translation usable?": captions that a
+re-segmenting engine (e.g. DeepL) merely merged or split are reported as
+warnings and never fail on their own; the ratios above decide how much
+content loss, timestamp drift or wrong-language text is still tolerable.
+
 EXIT CODES:
-  0  The translation is valid (no defects found).
-  1  Defects were found (the translation is invalid), or a --update failed.
+  0  The translation is usable (no threshold exceeded / no errors).
+  1  The translation is not usable, or a --update failed.
   2  Usage error, or the validator could not run.
 
 EXAMPLES:
@@ -270,6 +291,11 @@ TXT;
             'json' => false,
             'lang' => null,
             'tolerance' => 0.5,
+            'strict' => false,
+            'max_loss_ratio' => null,
+            'max_drift_ratio' => null,
+            'max_partial_ratio' => null,
+            'max_merge_ratio' => null,
             'files' => [],
         ];
 
@@ -301,6 +327,26 @@ TXT;
 
             if ($arg === '--json' || $arg === '-j') {
                 $options['json'] = true;
+                continue;
+            }
+
+            if ($arg === '--strict') {
+                $options['strict'] = true;
+                continue;
+            }
+
+            $ratioOptions = [
+                '--max-loss-ratio' => 'max_loss_ratio',
+                '--max-drift-ratio' => 'max_drift_ratio',
+                '--max-partial-ratio' => 'max_partial_ratio',
+                '--max-merge-ratio' => 'max_merge_ratio',
+            ];
+            if (isset($ratioOptions[$arg])) {
+                $value = $normalized[++$i] ?? '';
+                if (!is_numeric($value) || (float)$value < 0 || (float)$value > 1) {
+                    return null;
+                }
+                $options[$ratioOptions[$arg]] = (float)$value;
                 continue;
             }
 
@@ -466,9 +512,15 @@ TXT;
             'language' => $lang,
             'timestamp_tolerance' => $tolerance,
             'defect_count' => count($defects),
+            'error_count' => (int)($result['error_count'] ?? 0),
+            'warning_count' => (int)($result['warning_count'] ?? 0),
             'defects_by_type' => $byType,
             'defects' => $defects,
         ];
+
+        if (isset($result['quality'])) {
+            $data['quality'] = $result['quality'];
+        }
 
         return self::encodeJson($data);
     }
@@ -491,7 +543,25 @@ TXT;
         $out .= self::line('Translation', $translation);
         $out .= self::line('Expected language', $lang);
         $out .= self::line('Timestamp tolerance', rtrim(rtrim(sprintf('%.3f', $tolerance), '0'), '.') . 's');
+        if (!empty($result['quality']['strict'])) {
+            $out .= self::line('Mode', 'strict (any error fails)');
+        }
         $out .= "\n";
+
+        if (isset($result['quality']['ratios'])) {
+            $out .= '  Quality' . "\n";
+            $out .= $dash . "\n";
+            foreach ($result['quality']['ratios'] as $name => $ratio) {
+                $threshold = $result['quality']['thresholds'][$name] ?? 0.0;
+                $out .= sprintf(
+                    '  %-19s %5.1f%%  (max %.1f%%)' . "\n",
+                    str_replace('_', ' ', $name) . ':',
+                    $ratio * 100,
+                    $threshold * 100
+                );
+            }
+            $out .= "\n";
+        }
 
         $defects = $result['defects'];
 
@@ -514,7 +584,22 @@ TXT;
         }
 
         $out .= $bar . "\n";
-        $out .= sprintf('  RESULT: FAILED - %d defect(s) found' . "\n", count($defects));
+        if ($result['valid']) {
+            $out .= sprintf(
+                '  RESULT: PASSED - translation is usable (%d error(s), %d warning(s) within limits)' . "\n",
+                $result['error_count'] ?? 0,
+                $result['warning_count'] ?? 0
+            );
+        } else {
+            $out .= sprintf(
+                '  RESULT: FAILED - %d error(s), %d warning(s)' . "\n",
+                $result['error_count'] ?? 0,
+                $result['warning_count'] ?? 0
+            );
+            foreach (($result['quality']['reasons'] ?? []) as $reason) {
+                $out .= '  * ' . $reason . "\n";
+            }
+        }
         $out .= $bar . "\n";
 
         return $out;
@@ -529,7 +614,7 @@ TXT;
     {
         $type = strtoupper(str_replace('_', ' ', $defect['type']));
 
-        $meta = [];
+        $meta = [$defect['severity'] ?? 'error'];
         if (!empty($defect['subtype'])) {
             $meta[] = $defect['subtype'];
         }

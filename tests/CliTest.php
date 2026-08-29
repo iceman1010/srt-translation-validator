@@ -23,6 +23,8 @@ class CliTest extends TestCase
         $this->fixtures['translated'] = $this->tmp . '/translated.srt';
         $this->fixtures['missing'] = $this->tmp . '/missing.srt';
         $this->fixtures['malformed'] = $this->tmp . '/malformed.srt';
+        $this->fixtures['merged'] = $this->tmp . '/merged.srt';
+        $this->fixtures['drifted'] = $this->tmp . '/drifted.srt';
 
         $english = 'The quick brown fox jumps over the lazy dog near the river bank.';
         $german = 'Der schnelle braune Fuchs sprang über den faulen Hund am Flussufer.';
@@ -36,10 +38,23 @@ class CliTest extends TestCase
             $deLines[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($end)) . "\n" . $german . ' ' . $i . "\n";
         }
 
+        // DeepL-style merge: one caption removed from the middle; the
+        // neighbouring cues keep their exact times.
+        $mergedLines = array_merge(array_slice($deLines, 0, 9), array_slice($deLines, 10));
+
+        // One caption shifted by +0.8s: too far for the 0.5s tolerance, but
+        // not onto another cue's start time.
+        $driftedLines = $deLines;
+        $driftedLines[9] = 10 . "\n"
+            . sprintf('%s --> %s', $this->tc(18.8), $this->tc(19.8)) . "\n"
+            . $german . ' 10' . "\n";
+
         file_put_contents($this->fixtures['original'], implode("\n", $enLines));
         file_put_contents($this->fixtures['translated'], implode("\n", $deLines));
         file_put_contents($this->fixtures['missing'], implode("\n", array_slice($deLines, 0, 1)));
         file_put_contents($this->fixtures['malformed'], "1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\nBROKEN_LINE_WITHOUT_TIMESTAMP\nMehr Text\n\n");
+        file_put_contents($this->fixtures['merged'], implode("\n", $mergedLines));
+        file_put_contents($this->fixtures['drifted'], implode("\n", $driftedLines));
     }
 
     protected function tearDown(): void
@@ -54,9 +69,10 @@ class CliTest extends TestCase
         }
     }
 
-    private function tc(int $seconds): string
+    private function tc(float $seconds): string
     {
-        return sprintf('%02d:%02d:%02d,000', 0, intdiv($seconds, 60), $seconds % 60);
+        $ms = (int)round(($seconds - (int)$seconds) * 1000);
+        return sprintf('%02d:%02d:%02d,%03d', 0, intdiv((int)$seconds, 60), (int)$seconds % 60, $ms);
     }
 
     private function execute(array $args): array
@@ -134,7 +150,50 @@ class CliTest extends TestCase
         [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['missing'], '-l', 'de']);
         $this->assertSame(1, $exit);
         $this->assertStringContainsString('RESULT: FAILED', $output);
-        $this->assertStringContainsString('MISSING PARTS', $output);
+        $this->assertStringContainsString('MISSING CAPTION', $output);
+    }
+
+    public function testMergedCaptionsPassWithWarning(): void
+    {
+        [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['merged'], '-l', 'de']);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('RESULT: PASSED', $output);
+        $this->assertStringContainsString('MERGED CAPTIONS [warning]', $output);
+    }
+
+    public function testDriftWithinRaisedThresholdPasses(): void
+    {
+        // 1 of 20 captions drifted (5%): above the default 2% threshold,
+        // but tolerable with an explicit --max-drift-ratio.
+        [$exit, $output] = $this->execute([
+            $this->fixtures['original'], $this->fixtures['drifted'], '-l', 'de',
+            '--max-drift-ratio=0.1',
+        ]);
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('RESULT: PASSED', $output);
+        $this->assertStringContainsString('TIMESTAMP MISMATCH', $output);
+    }
+
+    public function testStrictFlagFailsOnErrors(): void
+    {
+        // Same raised threshold, but strict mode fails on the single
+        // error-severity defect regardless of ratios.
+        [$exit, $output] = $this->execute([
+            $this->fixtures['original'], $this->fixtures['drifted'], '-l', 'de',
+            '--max-drift-ratio=0.1', '--strict',
+        ]);
+        $this->assertSame(1, $exit);
+        $this->assertStringContainsString('RESULT: FAILED', $output);
+        $this->assertStringContainsString('strict mode', $output);
+    }
+
+    public function testInvalidRatioOptionIsUsageError(): void
+    {
+        [$exit] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de', '--max-drift-ratio=1.5']);
+        $this->assertSame(2, $exit);
+
+        [$exit] = $this->execute([$this->fixtures['original'], $this->fixtures['translated'], '-l', 'de', '--max-loss-ratio=abc']);
+        $this->assertSame(2, $exit);
     }
 
     public function testMalformedFormatFails(): void
@@ -162,8 +221,15 @@ class CliTest extends TestCase
         $this->assertSame('passed', $data['result']);
         $this->assertSame('de', $data['language']);
         $this->assertSame(0, $data['defect_count']);
+        $this->assertSame(0, $data['error_count']);
+        $this->assertSame(0, $data['warning_count']);
         $this->assertSame([], $data['defects']);
         $this->assertSame([], $data['defects_by_type']);
+
+        $this->assertIsArray($data['quality']);
+        $this->assertIsArray($data['quality']['ratios']);
+        $this->assertIsArray($data['quality']['thresholds']);
+        $this->assertSame([], $data['quality']['reasons']);
     }
 
     public function testJsonDefectsOutput(): void
@@ -177,14 +243,21 @@ class CliTest extends TestCase
         $this->assertSame('failed', $data['result']);
         $this->assertGreaterThan(0, $data['defect_count']);
         $this->assertSame(count($data['defects']), $data['defect_count']);
+        $this->assertGreaterThan(0, $data['error_count']);
 
         $counted = [];
+        $errors = 0;
         foreach ($data['defects'] as $defect) {
             $this->assertNotEmpty($defect['type']);
             $this->assertNotEmpty($defect['message']);
+            $this->assertContains($defect['severity'], ['error', 'warning']);
+            if ($defect['severity'] === 'error') {
+                $errors++;
+            }
             $counted[$defect['type']] = ($counted[$defect['type']] ?? 0) + 1;
         }
         $this->assertEquals($counted, $data['defects_by_type']);
+        $this->assertSame($errors, $data['error_count']);
     }
 
     public function testJsonErrorOutput(): void

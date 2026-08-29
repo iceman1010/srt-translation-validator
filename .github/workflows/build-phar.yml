@@ -134,10 +134,6 @@ jobs:
             srt-translation-validator original.srt translation.srt --lang=de
             ```
 
-            ### How to bump the version
-            Edit the `VERSION` file (e.g. `1.0.0` -> `1.0.1`) and push to `main`.
-            The workflow rebuilds the PHAR and creates/updates this release.
-
             ### Changes
             See commit history: https://github.com/${{ github.repository }}/commits/main
           files: build/srt-translation-validator.phar
