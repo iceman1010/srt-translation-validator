@@ -31,14 +31,27 @@ final class SrtTranslationValidator
 
     private const DEFAULT_MAX_LOSS_RATIO = 0.01;
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
-    private const DEFAULT_MAX_PARTIAL_RATIO = 0.05;
     private const DEFAULT_MAX_MERGE_RATIO = 0.10;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
+    private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;
     /** Zero tolerance by default: any foreign-script letter is suspicious. */
     private const DEFAULT_MAX_SCRIPT_RATIO = 0.0;
 
     /** Minimum cue duration (seconds) a caption needs to count for CPS. */
     private const MIN_CPS_DURATION = 0.2;
+
+    /**
+     * A pair at least this similar to its source (after normalization)
+     * counts as near-verbatim: lightly edited, no real translation work.
+     */
+    private const NEAR_VERBATIM_SIMILARITY = 90.0;
+
+    /**
+     * Minimum share of source letters in the target's characteristic script
+     * for the script-based same-language fallback: below it, a few stray
+     * foreign letters must not turn the job into a "passthrough".
+     */
+    private const PASSTHROUGH_SCRIPT_SHARE = 0.10;
 
     private Language $languageDetector;
     private SubtitleFormatValidator $formatValidator;
@@ -47,13 +60,20 @@ final class SrtTranslationValidator
 
     private float $maxLossRatio = self::DEFAULT_MAX_LOSS_RATIO;
     private float $maxDriftRatio = self::DEFAULT_MAX_DRIFT_RATIO;
-    private float $maxPartialRatio = self::DEFAULT_MAX_PARTIAL_RATIO;
     private float $maxMergeRatio = self::DEFAULT_MAX_MERGE_RATIO;
     private float $maxVerbatimRatio = self::DEFAULT_MAX_VERBATIM_RATIO;
+    private float $maxNearVerbatimRatio = self::DEFAULT_MAX_NEAR_VERBATIM_RATIO;
     private float $maxScriptRatio = self::DEFAULT_MAX_SCRIPT_RATIO;
     /** null = no error-count gate (ratio thresholds decide alone). */
     private ?int $maxErrors = null;
     private bool $strict = false;
+
+    /**
+     * Declared language of the source file (base code), when known from the
+     * job request. When it matches the target language, the verbatim gates
+     * are skipped: a same-language passthrough is expected, not a failure.
+     */
+    private ?string $sourceLanguage = null;
 
     /**
      * The detector is injectable because the plain `new Language()`
@@ -95,13 +115,6 @@ final class SrtTranslationValidator
         }
     }
 
-    public function setMaxPartialRatio(?float $ratio): void
-    {
-        if ($ratio !== null) {
-            $this->maxPartialRatio = $ratio;
-        }
-    }
-
     public function setMaxMergeRatio(?float $ratio): void
     {
         if ($ratio !== null) {
@@ -113,6 +126,13 @@ final class SrtTranslationValidator
     {
         if ($ratio !== null) {
             $this->maxVerbatimRatio = $ratio;
+        }
+    }
+
+    public function setMaxNearVerbatimRatio(?float $ratio): void
+    {
+        if ($ratio !== null) {
+            $this->maxNearVerbatimRatio = $ratio;
         }
     }
 
@@ -131,6 +151,19 @@ final class SrtTranslationValidator
     public function setMaxErrors(?int $count): void
     {
         $this->maxErrors = $count;
+    }
+
+    /**
+     * Declares the language of the source file (e.g. from the job request).
+     * When it matches the expected translation language, the verbatim and
+     * near-verbatim gates are skipped: the job is a same-language
+     * passthrough, so an unchanged copy is not a translation failure.
+     */
+    public function setSourceLanguage(?string $language): void
+    {
+        $this->sourceLanguage = $language !== null && $language !== ''
+            ? ScriptChecker::baseLanguage($language)
+            : null;
     }
 
     /**
@@ -203,7 +236,20 @@ final class SrtTranslationValidator
 
         $defects = array_merge($defects, $alignmentDefects, $partial['defects']);
 
-        if ($stats['compared_pairs'] > 0 && $stats['verbatim_ratio'] > $this->maxVerbatimRatio) {
+        // Same-language passthrough: when the source is already in the
+        // target language (declared via --source-lang, or evident from its
+        // script), a verbatim copy is expected output, not a failure.
+        $passthrough = $this->isSameLanguagePassthrough($originalBlocks, $expectedLanguage);
+        if ($passthrough) {
+            $defects[] = [
+                'type' => 'same_language_passthrough',
+                'severity' => 'warning',
+                'message' => 'Source file is already written in the target language; '
+                    . 'verbatim/untranslated gates skipped (same-language passthrough)',
+            ];
+        }
+
+        if (!$passthrough && $stats['compared_pairs'] > 0 && $stats['verbatim_ratio'] > $this->maxVerbatimRatio) {
             $defects[] = [
                 'type' => 'untranslated_copy',
                 'severity' => 'error',
@@ -216,6 +262,28 @@ final class SrtTranslationValidator
                 'identical_pairs' => $stats['identical_pairs'],
                 'compared_pairs' => $stats['compared_pairs'],
                 'ratio' => $stats['verbatim_ratio']
+            ];
+        } elseif (!$passthrough
+            && $stats['compared_pairs'] > 0
+            && $stats['near_verbatim_ratio'] > $this->maxNearVerbatimRatio
+        ) {
+            // The exact-copy gate did not fire, but the translation is still
+            // dominated by near-identical pairs: the model returned the
+            // source with light cosmetic editing.
+            $defects[] = [
+                'type' => 'edited_copy',
+                'severity' => 'error',
+                'message' => sprintf(
+                    '%d of %d aligned captions are identical or nearly identical (>=90%% similar) to the source (%.1f%%), but only %.1f%% are exactly identical - this appears to be an edited, untranslated copy',
+                    $stats['identical_pairs'] + $stats['near_verbatim_pairs'],
+                    $stats['compared_pairs'],
+                    $stats['near_verbatim_ratio'] * 100,
+                    $stats['verbatim_ratio'] * 100
+                ),
+                'identical_pairs' => $stats['identical_pairs'],
+                'near_identical_pairs' => $stats['near_verbatim_pairs'],
+                'compared_pairs' => $stats['compared_pairs'],
+                'ratio' => $stats['near_verbatim_ratio']
             ];
         }
 
@@ -258,11 +326,14 @@ final class SrtTranslationValidator
             'ratios' => [
                 'content_loss' => $stats['loss_ratio'],
                 'timestamp_drift' => $stats['drift_ratio'],
+                // Advisory only (detector output is decoration, never a
+                // verdict): reported for humans, threshold null.
                 'partial_translation' => $partial['analyzed_chars'] > 0
                     ? round($partial['wrong_chars'] / $partial['analyzed_chars'], 4)
                     : 0.0,
                 'merged' => $stats['merge_ratio'],
                 'verbatim_copy' => $stats['verbatim_ratio'],
+                'near_verbatim_copy' => $stats['near_verbatim_ratio'],
                 'unexpected_script' => $scriptRatio,
                 'unaligned' => $stats['source_captions'] > 0
                     ? round(1 - $stats['aligned_pairs'] / $stats['source_captions'], 4)
@@ -271,9 +342,12 @@ final class SrtTranslationValidator
             'thresholds' => [
                 'content_loss' => $this->maxLossRatio,
                 'timestamp_drift' => $this->maxDriftRatio,
-                'partial_translation' => $this->maxPartialRatio,
+                'partial_translation' => null,
                 'merged' => $this->maxMergeRatio,
-                'verbatim_copy' => $this->maxVerbatimRatio,
+                // Advisory while a passthrough: an unchanged copy is the
+                // expected output, so neither copy ratio gates anything.
+                'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
+                'near_verbatim_copy' => $passthrough ? null : $this->maxNearVerbatimRatio,
                 'unexpected_script' => $this->maxScriptRatio,
                 'unaligned' => null,
             ],
@@ -415,7 +489,7 @@ final class SrtTranslationValidator
      * @param list<array<string, mixed>> $events
      * @param list<array{start: float, end: float, lines: list<string>}> $originalBlocks
      * @param list<array{start: float, end: float, lines: list<string>}> $translationBlocks
-     * @return array{0: list<array>, 1: array{source_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, identical_pairs: int, compared_pairs: int}}
+     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int}}
      */
     private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks): array
     {
@@ -425,7 +499,21 @@ final class SrtTranslationValidator
         $missingCaptions = 0;
         $mergedCaptions = 0;
         $identicalPairs = 0;
+        $nearVerbatimPairs = 0;
         $comparedPairs = 0;
+
+        // Normalized source text per caption, computed once: pairs whose
+        // source normalizes to nothing (music cues "♪♪", "[music]", "...")
+        // carry no translatable content and are excluded from the verbatim
+        // and loss/merge bookkeeping.
+        $sourceTexts = [];
+        $contentCaptions = 0;
+        foreach ($originalBlocks as $i => $block) {
+            $sourceTexts[$i] = $this->normalizeForComparison(implode(' ', $block['lines']));
+            if ($sourceTexts[$i] !== '') {
+                $contentCaptions++;
+            }
+        }
 
         foreach ($events as $event) {
             switch ($event['kind']) {
@@ -438,12 +526,20 @@ final class SrtTranslationValidator
                     // Verbatim-copy measurement: a pair whose translation
                     // equals the source after normalization carried no
                     // translation work. Pairs with no translatable text
-                    // ("...", "♪") are skipped.
-                    $sourceText = $this->normalizeForComparison(implode(' ', $originalBlocks[$i]['lines']));
+                    // ("...", "♪") are skipped. Pairs that are merely
+                    // lightly edited (high similarity, not equal) count as
+                    // near-verbatim.
+                    $sourceText = $sourceTexts[$i];
                     if ($sourceText !== '') {
+                        $translationText = $this->normalizeForComparison(implode(' ', $translationBlocks[$j]['lines']));
                         $comparedPairs++;
-                        if ($sourceText === $this->normalizeForComparison(implode(' ', $translationBlocks[$j]['lines']))) {
+                        if ($sourceText === $translationText) {
                             $identicalPairs++;
+                        } else {
+                            similar_text($sourceText, $translationText, $similarity);
+                            if ($similarity >= self::NEAR_VERBATIM_SIMILARITY) {
+                                $nearVerbatimPairs++;
+                            }
                         }
                     }
 
@@ -468,7 +564,18 @@ final class SrtTranslationValidator
                     break;
 
                 case 'gap':
-                    $indices = $event['source_indices'];
+                    $indices = array_values(array_filter(
+                        $event['source_indices'],
+                        fn (int $i): bool => $sourceTexts[$i] !== ''
+                    ));
+
+                    // Only non-content cues (music, dots, annotations) were
+                    // dropped or condensed: not content loss, not even a
+                    // merge warning.
+                    if ($indices === []) {
+                        break;
+                    }
+
                     $interior = $event['after_translation_index'] !== null
                         && $event['before_translation_index'] !== null;
 
@@ -529,14 +636,59 @@ final class SrtTranslationValidator
 
         return [$defects, [
             'source_captions' => $sourceCount,
+            'content_captions' => $contentCaptions,
             'aligned_pairs' => $pairs,
-            'loss_ratio' => $sourceCount > 0 ? round($missingCaptions / $sourceCount, 4) : 0.0,
+            // Loss and merge ratios are measured over content captions:
+            // music cues and annotations are outside the dialogue contract.
+            'loss_ratio' => $contentCaptions > 0 ? round($missingCaptions / $contentCaptions, 4) : 0.0,
             'drift_ratio' => $pairs > 0 ? round($driftedPairs / $pairs, 4) : 0.0,
-            'merge_ratio' => $sourceCount > 0 ? round($mergedCaptions / $sourceCount, 4) : 0.0,
+            'merge_ratio' => $contentCaptions > 0 ? round($mergedCaptions / $contentCaptions, 4) : 0.0,
             'identical_pairs' => $identicalPairs,
+            'near_verbatim_pairs' => $nearVerbatimPairs,
             'compared_pairs' => $comparedPairs,
             'verbatim_ratio' => $comparedPairs > 0 ? round($identicalPairs / $comparedPairs, 4) : 0.0,
+            'near_verbatim_ratio' => $comparedPairs > 0
+                ? round(($identicalPairs + $nearVerbatimPairs) / $comparedPairs, 4)
+                : 0.0,
         ]];
+    }
+
+    /**
+     * Whether the source file is already written in the target language.
+     *
+     * Primary signal: the declared source language (job request). Fallback
+     * for non-Latin targets when nothing was declared: the source is
+     * substantially written in the target's characteristic script (Cyrillic
+     * for bg, kana for ja, ...). Latin-written targets get no fallback --
+     * script cannot distinguish English from Dutch, and for those an
+     * unchanged copy must stay a failure (the untranslated defect).
+     *
+     * @param list<array{lines: list<string>}> $sourceBlocks
+     */
+    private function isSameLanguagePassthrough(array $sourceBlocks, string $targetLanguage): bool
+    {
+        $target = ScriptChecker::baseLanguage($targetLanguage);
+
+        if ($this->sourceLanguage !== null) {
+            return $this->sourceLanguage === $target;
+        }
+
+        $characteristic = ScriptChecker::characteristicScripts($target);
+        if ($characteristic === null || $characteristic === []) {
+            return false;
+        }
+
+        $profile = $this->scriptChecker->scriptProfile($sourceBlocks);
+        $total = array_sum($profile);
+        if ($total <= 0) {
+            return false;
+        }
+        foreach ($characteristic as $script) {
+            if (($profile[$script] ?? 0) / $total >= self::PASSTHROUGH_SCRIPT_SHARE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -557,12 +709,17 @@ final class SrtTranslationValidator
      * Chunked language detection over the translation. Returns the defects
      * plus the character totals used for the partial-translation ratio.
      *
+     * Advisory only: the detector's label is decoration and never fails the
+     * verdict (the defect is a warning and the ratio's threshold is null).
+     * Language tags are compared on their base code, so a regional target
+     * ("es-mx") matches its base detection ("es").
+     *
      * @param list<array{lines: list<string>}> $blocks
      * @return array{defects: list<array>, wrong_chars: int, analyzed_chars: int}
      */
     private function detectPartialTranslation(array $blocks, string $expectedLanguage): array
     {
-        $expectedLanguage = strtolower($expectedLanguage);
+        $expectedLanguage = ScriptChecker::baseLanguage($expectedLanguage);
 
         $defects = [];
         $wrongChars = 0;
@@ -584,14 +741,14 @@ final class SrtTranslationValidator
                 continue;
             }
 
-            $detectedLanguage = strtolower((string)array_key_first($detections));
+            $detectedLanguage = ScriptChecker::baseLanguage((string)array_key_first($detections));
             $confidence = reset($detections);
 
             if ($detectedLanguage !== $expectedLanguage && $confidence > self::MIN_CONFIDENCE) {
                 $wrongChars += strlen($chunkText);
                 $defects[] = [
                     'type' => 'partial_translation',
-                    'severity' => 'error',
+                    'severity' => 'warning',
                     'message' => 'Large block (captions ' . ($chunkStart + 1) . "-{$chunkEnd}) detected as {$detectedLanguage} instead of {$expectedLanguage} - " . ($chunkEnd - $chunkStart) . ' captions, ' . strlen($chunkText) . ' chars',
                     'start_caption' => $chunkStart + 1,
                     'end_caption' => $chunkEnd,

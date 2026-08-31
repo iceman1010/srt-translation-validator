@@ -34,10 +34,11 @@ class SrtTranslationValidatorTest extends TestCase
         $this->assertSame(0, $result['warning_count']);
 
         foreach ($result['quality']['ratios'] as $name => $ratio) {
-            if ($name === 'verbatim_copy') {
+            if ($name === 'verbatim_copy' || $name === 'near_verbatim_copy') {
                 // Names and short interjections legitimately stay identical
-                // across languages; only a near-total copy may fail.
-                $this->assertLessThan(0.2, $ratio, 'Verbatim share of a real translation must stay small');
+                // (or near-identical) across languages; only a near-total
+                // copy may fail.
+                $this->assertLessThan(0.2, $ratio, "Ratio {$name} of a real translation must stay small");
                 continue;
             }
             $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");
@@ -51,7 +52,7 @@ class SrtTranslationValidatorTest extends TestCase
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], '25 missing captions (1.36%) should fail validation');
+        $this->assertFalse($result['valid'], '25 missing captions (1.49% of content captions) should fail validation');
 
         $missing = array_filter($result['defects'], function ($defect) {
             return $defect['type'] === 'missing_caption';
@@ -59,7 +60,9 @@ class SrtTranslationValidatorTest extends TestCase
 
         $this->assertCount(25, $missing);
         $this->assertSame(25, $result['error_count']);
-        $this->assertEqualsWithDelta(0.0136, $result['quality']['ratios']['content_loss'], 0.0005);
+        // The loss ratio is measured over CONTENT captions only (music cues
+        // and annotations are excluded from the denominator).
+        $this->assertEqualsWithDelta(0.0149, $result['quality']['ratios']['content_loss'], 0.0005);
 
         // The removed captions sit in the middle of the file, so nothing
         // may be reported as merged.
@@ -183,17 +186,44 @@ class SrtTranslationValidatorTest extends TestCase
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], 'Half the file in English should fail validation');
+        $this->assertFalse($result['valid'], 'Half the file as verbatim English must fail validation (untranslated copy)');
 
         $partialTranslationDefects = array_filter($result['defects'], function ($defect) {
             return $defect['type'] === 'partial_translation';
         });
 
         $this->assertNotEmpty($partialTranslationDefects, 'Should detect partial translation defects');
+        foreach ($partialTranslationDefects as $defect) {
+            // Advisory only: the detector label never fails the verdict.
+            $this->assertSame('warning', $defect['severity']);
+        }
         $this->assertGreaterThan(
             0.05,
             $result['quality']['ratios']['partial_translation'],
-            'The wrong-language ratio should exceed the threshold'
+            'The wrong-language ratio should still be measured'
+        );
+        $this->assertNull(
+            $result['quality']['thresholds']['partial_translation'],
+            'The wrong-language ratio must be advisory (no threshold)'
+        );
+    }
+
+    public function testRegionalTargetTagMatchesBaseDetection(): void
+    {
+        // A correct German translation validated with a regional target tag
+        // ("de-DE") must not flag partial translation: detection returns the
+        // base code and both sides are compared on the base language
+        // (the es-mx false-positive scenario, jobs 44919/45205/45207).
+        $originalPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.en.srt';
+        $translationPath = $this->examplesDir . 'The.Matrix.1999.Tubi.CC.de.srt';
+
+        $result = $this->validator->validate($originalPath, $translationPath, 'de-DE');
+
+        $this->assertTrue($result['valid'], 'A regional target tag must not flip the verdict');
+        $this->assertCount(
+            0,
+            array_filter($result['defects'], fn ($d) => $d['type'] === 'partial_translation'),
+            'Base-code detection must match a regional target tag'
         );
     }
 

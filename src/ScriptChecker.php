@@ -99,13 +99,7 @@ final class ScriptChecker
      */
     public function check(array $blocks, string $language, ?array $sourceBlocks = null): ?array
     {
-        $language = strtolower(trim($language));
-        // Accept regional tags (zh-cn, pt-BR, de-AT): the script of the
-        // base language applies.
-        $dash = strcspn($language, '-_');
-        if ($dash > 0 && $dash < strlen($language)) {
-            $language = substr($language, 0, $dash);
-        }
+        $language = self::baseLanguage($language);
         if ($language === '' || !isset(self::LANGUAGE_SCRIPTS[$language])) {
             return null;
         }
@@ -153,6 +147,61 @@ final class ScriptChecker
         }
 
         return ['letters' => $letters, 'foreign_chars' => $foreignChars, 'scripts' => $scripts, 'examples' => $examples];
+    }
+
+    /**
+     * Reduces a language tag to its base language: lowercased, with any
+     * regional suffix stripped ("es-mx" / "pt_BR" -> "es" / "pt"), so
+     * comparisons never fail on the region part.
+     */
+    public static function baseLanguage(string $language): string
+    {
+        $language = strtolower(trim($language));
+        $dash = strcspn($language, '-_');
+        if ($dash > 0 && $dash < strlen($language)) {
+            $language = substr($language, 0, $dash);
+        }
+        return $language;
+    }
+
+    /**
+     * The scripts distinctive to a language, i.e. its allowed scripts minus
+     * Latin (which every language may use for names and brands). Empty list
+     * for Latin-written languages, null when the language is unknown: for
+     * those, script-based reasoning must be skipped rather than guessed.
+     *
+     * @return list<string>|null
+     */
+    public static function characteristicScripts(string $language): ?array
+    {
+        $language = self::baseLanguage($language);
+        if ($language === '' || !isset(self::LANGUAGE_SCRIPTS[$language])) {
+            return null;
+        }
+        return self::LANGUAGE_SCRIPTS[$language];
+    }
+
+    /**
+     * Raw letter counts per script over the given captions (no exemptions),
+     * used to reason about what script a file is actually written in.
+     *
+     * @param list<array{lines: list<string>}> $blocks
+     * @return array<string, int>
+     */
+    public function scriptProfile(array $blocks): array
+    {
+        $profile = [];
+        foreach ($blocks as $block) {
+            foreach ($block['lines'] as $line) {
+                foreach (mb_str_split($line) as $char) {
+                    $script = $this->scriptOf($char);
+                    if ($script !== null) {
+                        $profile[$script] = ($profile[$script] ?? 0) + 1;
+                    }
+                }
+            }
+        }
+        return $profile;
     }
 
     /** @return string|null the script name of a character, null when neutral */

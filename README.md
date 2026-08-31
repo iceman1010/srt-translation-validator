@@ -7,16 +7,18 @@ timeline and reports these defect types:
 | Defect                | Severity | What it detects                                                          |
 | --------------------- | -------- | ------------------------------------------------------------------------ |
 | `invalid_format`      | error    | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage, NUL bytes) |
-| `missing_caption`     | error    | Source captions with no translation counterpart at all (real content loss) |
-| `partial_translation` | error    | Large caption blocks detected in the wrong language (e.g. left untranslated) |
+| `missing_caption`     | error    | Source captions with no translation counterpart at all (real content loss; music/annotation-only cues are excluded) |
+| `partial_translation` | warning  | Large caption blocks detected in the wrong language. **Advisory only** - the detector label is decoration and never fails the verdict |
 | `timestamp_mismatch`  | error    | Aligned captions whose start/end times drifted beyond a tolerance       |
-| `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source (no translation happened) |
+| `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (same-language passthrough) |
+| `edited_copy`         | error    | Nearly all captions are identical or >=90% similar to the source, yet not exactly identical - the model returned the original with light cosmetic edits. A different failure mode than `untranslated_copy` |
 | `unexpected_script`   | error    | Translation letters in a script foreign to the target language (character hallucination, e.g. Cyrillic in Hungarian); letters already spelled that way in the source are exempt |
 | `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
 | `split_captions`      | warning  | One source caption split across multiple translation captions           |
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
 | `format_mismatch`     | warning  | Source and translation use different container formats (compared on cue structure anyway) |
 | `source_parse_failed` | warning  | The source file itself is malformed; the translation verdict is skipped  |
+| `same_language_passthrough` | warning | The source is already written in the target language (declared with `--source-lang`, or evident from its script); the verbatim/untranslated gates are skipped |
 
 ## The verdict: "usable", not "identical"
 
@@ -29,12 +31,14 @@ then judges the translation by how much is actually wrong:
 
 | Ratio                | Measures                                             | Default limit |
 | -------------------- | ---------------------------------------------------- | ------------- |
-| `content_loss`       | source captions with no translation counterpart      | 1%            |
+| `content_loss`       | source captions with no translation counterpart (content captions only - music/annotation cues excluded) | 1%            |
 | `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
-| `partial_translation`| translation characters detected in the wrong language | 5%            |
-| `merged`             | source captions merged into neighbouring captions    | 10%           |
-| `verbatim_copy`      | aligned captions identical to the source             | 50%           |
+| `partial_translation`| translation characters detected in the wrong language (base-code comparison: `es-mx` target matches `es` detection) | advisory (no limit) |
+| `merged`             | source captions merged into neighbouring captions (content captions only) | 10%           |
+| `verbatim_copy`      | aligned captions identical to the source             | 50% (advisory during a same-language passthrough) |
+| `near_verbatim_copy` | aligned captions identical or >= 90% similar to the source (lightly edited passthrough) | 50% (advisory during a same-language passthrough) |
 | `unexpected_script`  | translation letters in a foreign script (not counting letters inherited from the source) | 0% (zero tolerance) |
+| `unaligned`          | source captions with no aligned translation pair     | advisory (no limit) |
 
 - A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
   its limit. Merges and splits are always reported as warnings and never fail
@@ -43,9 +47,16 @@ then judges the translation by how much is actually wrong:
 - The measured ratios are always included in the report (`quality` block), so
   thresholds can be calibrated from real data. Each limit can be overridden
   per run with `--max-loss-ratio`, `--max-drift-ratio`,
-  `--max-partial-ratio`, `--max-merge-ratio`, `--max-verbatim-ratio` and
+  `--max-merge-ratio`, `--max-verbatim-ratio` and
   `--max-script-ratio` (values between `0` and `1`); `--max-errors` fails a
   run with more than N error-severity defects regardless of the ratios.
+- **Same-language passthrough**: when the source file is already written in
+  the target language, a verbatim copy is expected output, not a failure.
+  Declare the source language with `--source-lang` (e.g. `--source-lang=bg`
+  with `-l bg`); for non-Latin targets the validator also infers this from
+  the source script automatically (Cyrillic source, `bg` target). A
+  `same_language_passthrough` warning is emitted and the verbatim gates are
+  skipped.
 - **Source vs. model**: the translation is the artefact under review, so
   format failures in the translation fail the job. A malformed *source* is
   the user's input, not the model's failure: it is reported as a
@@ -118,14 +129,15 @@ compares them, and prints a human-readable report.
 | Option                 | Description                                                              |
 | ---------------------- | ------------------------------------------------------------------------ |
 | `-l, --lang=CODE`      | Expected language of the translation (ISO 639-1, e.g. `de`). Default: auto-detected from the translation text. |
+| `--source-lang=CODE`   | Declared language of the original file (e.g. from the job request). When it matches `--lang`, the verbatim/untranslated gates are skipped (same-language passthrough). For non-Latin targets this is also inferred from the source script automatically. |
 | `-t, --tolerance=SEC`  | Timestamp drift tolerance in seconds (default: `0.5`).                   |
 | `-j, --json`           | Print the report as JSON (for scripts, agents and LLMs). Exit codes are unchanged. |
 | `--strict`             | Fail on any error-severity defect, ignoring the quality-ratio limits.    |
 | `--max-loss-ratio=F`   | Max share of source captions with no translation at all (default: `0.01`). |
 | `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). |
-| `--max-partial-ratio=F`| Max share of translation chars in the wrong language (default: `0.05`).  |
 | `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions (default: `0.10`). |
 | `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
+| `--max-near-verbatim-ratio=F` | Max share of aligned captions that may be identical or >=90% similar to the source; catches copies with light cosmetic edits as `edited_copy` (default: `0.50`). |
 | `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
 | `--max-errors=N`       | Fail when more than N error-severity defects are found, regardless of the ratios (default: no limit). |
 | `--readability`        | Readability audit of a single subtitle file: runs a per-caption check against readability limits and lists every caption that exceeds them. Purely advisory - no verdict, no defects, exit code is 0 when every caption is clean and 1 when problems are found. Takes exactly one file. |
@@ -203,15 +215,17 @@ reported as `{"error": "..."}` with exit code `2`.
             "partial_translation": 0.0,
             "merged": 0.0052,
             "verbatim_copy": 0.0026,
+            "near_verbatim_copy": 0.0065,
             "unexpected_script": 0.0,
             "unaligned": 0.0052
         },
         "thresholds": {
             "content_loss": 0.01,
             "timestamp_drift": 0.02,
-            "partial_translation": 0.05,
+            "partial_translation": null,
             "merged": 0.1,
             "verbatim_copy": 0.5,
+            "near_verbatim_copy": 0.5,
             "unexpected_script": 0.0,
             "unaligned": null
         },
@@ -229,7 +243,9 @@ reported as `{"error": "..."}` with exit code `2`.
 ```
 
 `valid: false` reports carry non-empty `quality.reasons` naming every exceeded
-limit (e.g. `"partial translation 45.35% exceeds the threshold 5.00%"`).
+limit (e.g. `"verbatim copy 70.52% exceeds the threshold 50.00%"`). Ratios
+with a `null` threshold (`partial_translation`, `unaligned`) are advisory:
+they are measured and reported but never flip the verdict.
 
 ### Example report
 
@@ -247,9 +263,10 @@ limit (e.g. `"partial translation 45.35% exceeds the threshold 5.00%"`).
   ------------------------------------------------------------------
   content loss:         0.0%  (max 1.0%)
   timestamp drift:      0.0%  (max 2.0%)
-  partial translation:   0.0%  (max 5.0%)
+  partial translation:   0.0%  (advisory)
   merged:               0.5%  (max 10.0%)
   verbatim copy:        0.3%  (max 50.0%)
+  near verbatim copy:   0.7%  (max 50.0%)
   unexpected script:    0.0%  (max 0.0%)
   unaligned:            0.5%  (advisory)
   reading speed:      12.4 cps avg, 21.7 cps max (caption #183)
@@ -386,14 +403,21 @@ $validator->setTimestampTolerance(0.2);
 $validator->setStrict(true);
 
 // Override any quality threshold
-// (defaults: loss 0.01 / drift 0.02 / partial 0.05 / merge 0.10 /
-//  verbatim 0.50 / script 0.00)
+// (defaults: loss 0.01 / drift 0.02 / merge 0.10 /
+//  verbatim 0.50 / near-verbatim 0.50 / script 0.00;
+//  partial_translation is advisory)
 $validator->setMaxLossRatio(0.02);
 $validator->setMaxDriftRatio(0.05);
-$validator->setMaxPartialRatio(0.10);
 $validator->setMaxMergeRatio(0.20);
 $validator->setMaxVerbatimRatio(0.60);
+$validator->setMaxNearVerbatimRatio(0.60);
 $validator->setMaxScriptRatio(0.001);
+
+// Declare the source language (e.g. from the job request): when it
+// matches the target, the verbatim/untranslated gates are skipped
+// (same-language passthrough). For non-Latin targets this is also
+// inferred from the source script automatically.
+$validator->setSourceLanguage('en');
 
 // Fail when more than N error-severity defects are found,
 // regardless of the ratios
@@ -448,7 +472,7 @@ foreach ($result['defects'] as $i => $defect) {
         ],
         [
             'type'     => 'partial_translation',
-            'severity' => 'error',
+            'severity' => 'warning', // advisory: never fails the verdict
             'message'  => 'Large block (captions 901-1400) detected as en instead of de - ...',
             'start_caption' => 901,
             'end_caption'   => 1400,
@@ -487,20 +511,22 @@ foreach ($result['defects'] as $i => $defect) {
         'source_captions' => 1834,
         'aligned_pairs'   => 1808,
         'ratios' => [
-            'content_loss'        => 0.0136,   // vs thresholds below
+            'content_loss'        => 0.0149,   // vs thresholds below (content captions only)
             'timestamp_drift'     => 0.0,
-            'partial_translation' => 0.0,
+            'partial_translation' => 0.0,      // advisory, no threshold
             'merged'              => 0.006,
             'verbatim_copy'       => 0.0026,
+            'near_verbatim_copy'  => 0.0065,
             'unexpected_script'   => 0.0,
             'unaligned'           => 0.0142,   // advisory, no threshold
         ],
         'thresholds' => [
             'content_loss'        => 0.01,
             'timestamp_drift'     => 0.02,
-            'partial_translation' => 0.05,
+            'partial_translation' => null,
             'merged'              => 0.10,
             'verbatim_copy'       => 0.50,
+            'near_verbatim_copy'  => 0.50,
             'unexpected_script'   => 0.0,
             'unaligned'           => null,
         ],

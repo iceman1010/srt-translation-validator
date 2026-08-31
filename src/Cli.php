@@ -75,9 +75,10 @@ final class Cli
         $validator->setStrict($options['strict']);
         $validator->setMaxLossRatio($options['max_loss_ratio']);
         $validator->setMaxDriftRatio($options['max_drift_ratio']);
-        $validator->setMaxPartialRatio($options['max_partial_ratio']);
+        $validator->setSourceLanguage($options['source_lang']);
         $validator->setMaxMergeRatio($options['max_merge_ratio']);
         $validator->setMaxVerbatimRatio($options['max_verbatim_ratio']);
+        $validator->setMaxNearVerbatimRatio($options['max_near_verbatim_ratio']);
         $validator->setMaxScriptRatio($options['max_script_ratio']);
         $validator->setMaxErrors($options['max_errors']);
 
@@ -331,6 +332,12 @@ POSITIONAL ARGUMENTS:
 OPTIONS:
   -l, --lang=CODE     Expected language of the translation (ISO 639-1, e.g. de).
                       Default: auto-detected from the translation text.
+      --source-lang=CODE
+                      Declared language of the original file, e.g. from the
+                      job request. When it matches --lang, the verbatim/
+                      untranslated gates are skipped (same-language
+                      passthrough). Optional; for non-Latin targets this is
+                      inferred from the source script automatically.
   -t, --tolerance=SEC Timestamp drift tolerance in seconds (default: 0.5).
   -j, --json          Output the report as JSON (machine-readable, for
                       scripts, agents and LLMs). Exit codes are unchanged.
@@ -352,16 +359,19 @@ OPTIONS:
                        quality-ratio thresholds below.
        --max-loss-ratio=F      Max share of source captions with no
                                translation at all (default: 0.01).
-       --max-drift-ratio=F    Max share of aligned captions with timestamp
-                               drift beyond the tolerance (default: 0.02).
-       --max-partial-ratio=F  Max share of translation chars detected in the
-                               wrong language (default: 0.05).
-       --max-merge-ratio=F    Max share of source captions merged into
-                               neighbouring translation captions
-                               (default: 0.10).
-        --max-verbatim-ratio=F Max share of aligned captions that may be
-                                verbatim copies of the source, i.e. no
-                                translation happened (default: 0.50).
+        --max-drift-ratio=F    Max share of aligned captions with timestamp
+                                drift beyond the tolerance (default: 0.02).
+        --max-merge-ratio=F    Max share of source captions merged into
+                                neighbouring translation captions
+                                (default: 0.10).
+         --max-verbatim-ratio=F Max share of aligned captions that may be
+                                 verbatim copies of the source, i.e. no
+                                 translation happened (default: 0.50).
+         --max-near-verbatim-ratio=F
+                                 Max share of aligned captions that may be
+                                 identical or >=90% similar to the source;
+                                 catches copies with light cosmetic edits
+                                 (default: 0.50).
         --max-script-ratio=F   Max share of translation letters that may be
                                 written in a script foreign to the target
                                 language, e.g. Cyrillic in Hungarian
@@ -413,13 +423,14 @@ TXT;
             'json' => false,
             'readability' => false,
             'lang' => null,
+            'source_lang' => null,
             'tolerance' => 0.5,
             'strict' => false,
             'max_loss_ratio' => null,
             'max_drift_ratio' => null,
-            'max_partial_ratio' => null,
             'max_merge_ratio' => null,
             'max_verbatim_ratio' => null,
+            'max_near_verbatim_ratio' => null,
             'max_script_ratio' => null,
             'max_errors' => null,
             'max_cps' => null,
@@ -509,9 +520,9 @@ TXT;
             $ratioOptions = [
                 '--max-loss-ratio' => 'max_loss_ratio',
                 '--max-drift-ratio' => 'max_drift_ratio',
-                '--max-partial-ratio' => 'max_partial_ratio',
                 '--max-merge-ratio' => 'max_merge_ratio',
                 '--max-verbatim-ratio' => 'max_verbatim_ratio',
+                '--max-near-verbatim-ratio' => 'max_near_verbatim_ratio',
                 '--max-script-ratio' => 'max_script_ratio',
             ];
             if (isset($ratioOptions[$arg])) {
@@ -551,6 +562,15 @@ TXT;
                     return null;
                 }
                 $options['lang'] = strtolower($value);
+                continue;
+            }
+
+            if ($arg === '--source-lang') {
+                $value = $normalized[++$i] ?? '';
+                if ($value === '') {
+                    return null;
+                }
+                $options['source_lang'] = strtolower($value);
                 continue;
             }
 

@@ -107,6 +107,27 @@ class CliTest extends TestCase
         return [$exitCode, implode("\n", $output)];
     }
 
+    public function testSourceLangFlagSkipsVerbatimGate(): void
+    {
+        // An English "translation" that is a verbatim copy of the English
+        // source: fails as an untranslated copy, unless the source language
+        // is declared equal to the target (same-language passthrough).
+        $copy = $this->tmp . '/copy.srt';
+        file_put_contents($copy, file_get_contents($this->fixtures['original']));
+        try {
+            [$exitFail, $outFail] = $this->execute([$this->fixtures['original'], $copy, '-l', 'en']);
+            $this->assertSame(1, $exitFail, 'An unchanged copy must fail without a declared source language');
+            $this->assertStringContainsString('UNTRANSLATED COPY', $outFail);
+
+            [$exitPass, $outPass] = $this->execute([$this->fixtures['original'], $copy, '-l', 'en', '--source-lang=en']);
+            $this->assertSame(0, $exitPass, 'A same-language passthrough must pass with --source-lang');
+            $this->assertStringContainsString('SAME LANGUAGE PASSTHROUGH', $outPass);
+            $this->assertStringContainsString('RESULT: PASSED', $outPass);
+        } finally {
+            @unlink($copy);
+        }
+    }
+
     public function testHelp(): void
     {
         [$exit, $output] = $this->execute(['--help']);
