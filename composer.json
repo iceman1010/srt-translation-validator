@@ -5,7 +5,7 @@
     "license": "proprietary",
     "require": {
         "php": "^8.0",
-        "mantas-done/subtitles": "^1.0",
+        "mantas-done/subtitles": "^0.3.10 || ^1.0",
         "patrickschur/language-detection": "^5.3"
     },
     "autoload": {

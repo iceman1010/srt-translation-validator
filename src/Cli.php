@@ -2,7 +2,6 @@
 
 namespace SrtValidator;
 
-use Done\Subtitles\Subtitles;
 use LanguageDetection\Language;
 
 /**
@@ -110,7 +109,7 @@ final class Cli
         }
 
         try {
-            $blocks = Subtitles::loadFromFile($file)->getInternalFormat();
+            $blocks = SubtitleLoader::loadFile($file)->getInternalFormat();
         } catch (\Throwable $e) {
             return self::fail('could not parse the subtitle file: ' . $file, $json);
         }
@@ -604,7 +603,7 @@ TXT;
         }
 
         try {
-            $subtitles = Subtitles::loadFromFile($translationPath);
+            $subtitles = SubtitleLoader::loadFile($translationPath);
         } catch (\Throwable $e) {
             return null;
         }

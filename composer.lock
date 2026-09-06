@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "4854b7ca156faffcba48963d675cf3f8",
+    "content-hash": "099f690b1493ebd3ed31c5050e7d16dd",
     "packages": [
         {
             "name": "mantas-done/subtitles",

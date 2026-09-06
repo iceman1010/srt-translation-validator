@@ -472,7 +472,7 @@ final class SrtTranslationValidator
     private function parseSubtitles(string $path): ?Subtitles
     {
         try {
-            return Subtitles::loadFromFile($path);
+            return SubtitleLoader::loadFile($path);
         } catch (\Throwable $e) {
             return null;
         }

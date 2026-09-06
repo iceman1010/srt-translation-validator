@@ -2,8 +2,6 @@
 
 namespace SrtValidator;
 
-use Done\Subtitles\Subtitles;
-
 /**
  * Extended per-caption readability analysis.
  *
@@ -59,7 +57,7 @@ final class ReadabilityChecker
     public function analyzeContent(string $content, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null): array
     {
         try {
-            $blocks = Subtitles::loadFromString($content)->getInternalFormat();
+            $blocks = SubtitleLoader::loadString($content)->getInternalFormat();
         } catch (\Throwable $e) {
             throw new \RuntimeException('could not parse the subtitle content: ' . $e->getMessage(), 0, $e);
         }
@@ -242,7 +240,7 @@ final class ReadabilityChecker
         }
 
         try {
-            return Subtitles::loadFromFile($file)->getInternalFormat();
+            return SubtitleLoader::loadFile($file)->getInternalFormat();
         } catch (\Throwable $e) {
             throw new \RuntimeException('could not parse the subtitle file: ' . $file . ' (' . $e->getMessage() . ')', 0, $e);
         }

@@ -136,7 +136,7 @@ class SrtTranslationValidatorTest extends TestCase
         // Simulate DeepL-style re-segmentation: remove single captions from
         // the middle of an otherwise perfect translation. The surrounding
         // cues still anchor exactly, so the holes are merges, not loss.
-        $original = Done\Subtitles\Subtitles::loadFromFile(
+        $original = \SrtValidator\SubtitleLoader::loadFile(
             $this->examplesDir . 'The.Matrix.1999.Tubi.CC.de.srt'
         );
         $blocks = $original->getInternalFormat();

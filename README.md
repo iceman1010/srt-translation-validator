@@ -82,6 +82,11 @@ You don't need to write any code. Download the pre-built `srt-translation-valida
 ## Requirements
 
 - PHP 8.0+ on your machine (no Composer, no composer packages needed)
+- `mantas-done/subtitles` 1.x or 0.3.10+ — the PHAR bundles its own copy,
+  so this only matters when installing the package via Composer into a
+  project that pins the 0.3.x line. On 0.3.x the parser is slightly more
+  lenient (malformed cues are skipped instead of reported) and SRT
+  timestamps written with `.` instead of `,` lose their milliseconds.
 
 ## Downloading
 
