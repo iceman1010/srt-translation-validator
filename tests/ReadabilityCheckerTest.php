@@ -179,4 +179,86 @@ class ReadabilityCheckerTest extends TestCase
         $this->assertSame(1, $analysis['max_cpl_caption']);
         $this->assertLessThan(40.0, $analysis['avg_cps']);
     }
+
+    /** Path of the per-test temporary subtitle file (removed in tearDown). */
+    private $tempFile;
+
+    protected function tearDown(): void
+    {
+        if ($this->tempFile !== null && is_file($this->tempFile)) {
+            unlink($this->tempFile);
+        }
+    }
+
+    /** Two-cue SRT: cue 1 is 80 chars over 1s (80 cps, critical), cue 2 clean. */
+    private function writeTempSrt(): string
+    {
+        $this->tempFile = tempnam(sys_get_temp_dir(), 'rc-test');
+        file_put_contents(
+            $this->tempFile,
+            "1\n00:00:01,000 --> 00:00:02,000\n" . str_repeat('a', 80) . "\n\n"
+            . "2\n00:00:04,000 --> 00:00:08,000\nA perfectly reasonable line.\n"
+        );
+
+        return $this->tempFile;
+    }
+
+    public function testConstructorBindsFileForArgumentlessAnalyze(): void
+    {
+        $analysis = (new ReadabilityChecker($this->writeTempSrt()))->analyze();
+
+        $this->assertSame(2, $analysis['captions']);
+        $this->assertCount(1, $analysis['problems']);
+        $this->assertSame(80.0, $analysis['problems'][0]['cps']);
+        $this->assertSame('critical', $analysis['problems'][0]['severity']);
+    }
+
+    public function testAnalyzeFileOneShotMatchesConstructorPath(): void
+    {
+        $file = $this->writeTempSrt();
+
+        $viaConstructor = (new ReadabilityChecker($file))->analyze();
+        $viaMethod = (new ReadabilityChecker())->analyzeFile($file);
+
+        $this->assertSame($viaConstructor, $viaMethod);
+    }
+
+    public function testAnalyzeContentRunsOnInMemorySrt(): void
+    {
+        $content = "1\n00:00:01,000 --> 00:00:02,000\n" . str_repeat('a', 80) . "\n";
+        $analysis = (new ReadabilityChecker())->analyzeContent($content);
+
+        $this->assertSame(1, $analysis['captions']);
+        $this->assertCount(1, $analysis['problems']);
+        $this->assertSame('reading_speed', $analysis['problems'][0]['issues'][0]['type']);
+    }
+
+    public function testAnalyzeFilePassesLimitOverrides(): void
+    {
+        $analysis = (new ReadabilityChecker())->analyzeFile($this->writeTempSrt(), 15.0, 37, 3);
+
+        $this->assertSame(['max_cps' => 15.0, 'max_cpl' => 37, 'max_lines' => 3], $analysis['thresholds']);
+        $this->assertSame('reading_speed', $analysis['problems'][0]['issues'][0]['type']);
+    }
+
+    public function testConstructorThrowsForMissingFile(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        new ReadabilityChecker('/nonexistent/path.srt');
+    }
+
+    public function testAnalyzeFileThrowsForMissingFile(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        (new ReadabilityChecker())->analyzeFile('/nonexistent/path.srt');
+    }
+
+    public function testAnalyzeWithoutBlocksOrFileThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+
+        (new ReadabilityChecker())->analyze();
+    }
 }

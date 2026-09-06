@@ -2,6 +2,8 @@
 
 namespace SrtValidator;
 
+use Done\Subtitles\Subtitles;
+
 /**
  * Extended per-caption readability analysis.
  *
@@ -11,6 +13,15 @@ namespace SrtValidator;
  * Purely advisory: it never produces defects or affects the translation
  * verdict; the CLI only enters this mode when explicitly asked with
  * --readability.
+ *
+ * A subtitle file can enter three ways:
+ *   new ReadabilityChecker('Movie.srt')   parsed once at construction,
+ *                                         analyze() then needs no arguments
+ *   ->analyzeFile('Movie.srt')            one-shot; ignores stored blocks
+ *   ->analyzeContent($srtString)          one-shot for content in memory
+ * ->analyze($blocks) still accepts pre-parsed caption blocks when you
+ * already have them. Unreadable input throws InvalidArgumentException,
+ * unparseable input RuntimeException; there are no partial results.
  */
 final class ReadabilityChecker
 {
@@ -24,18 +35,41 @@ final class ReadabilityChecker
     /** Minimum cue duration (seconds) a caption needs to count for CPS. */
     private const MIN_CPS_DURATION = 0.2;
 
+    /** @var list<array{start: float, end: float, lines: list<string>}>|null */
+    private $blocks = null;
+
     /**
-     * A caption is flagged "critical" when its value exceeds twice the limit,
-     * otherwise "minor". LLM consumers can sort/prioritize without
-     * re-deriving the math.
+     * Optionally bind the checker to a subtitle file (.srt or .vtt); the
+     * file is loaded and parsed immediately.
      */
-    private static function severity(int|float $value, int|float $limit): string
+    public function __construct(?string $file = null)
     {
-        return $value > 2 * $limit ? 'critical' : 'minor';
+        if ($file !== null) {
+            $this->blocks = self::loadBlocks($file);
+        }
+    }
+
+    /** Load, parse and audit a subtitle file (.srt or .vtt) in one call. */
+    public function analyzeFile(string $file, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null): array
+    {
+        return $this->analyze(self::loadBlocks($file), $maxCps, $maxCpl, $maxLines);
+    }
+
+    /** Parse and audit subtitle content (.srt or .vtt) held in memory. */
+    public function analyzeContent(string $content, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null): array
+    {
+        try {
+            $blocks = Subtitles::loadFromString($content)->getInternalFormat();
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('could not parse the subtitle content: ' . $e->getMessage(), 0, $e);
+        }
+
+        return $this->analyze($blocks, $maxCps, $maxCpl, $maxLines);
     }
 
     /**
-     * @param list<array{start: float, end: float, lines: list<string>}> $blocks
+     * @param list<array{start: float, end: float, lines: list<string>}>|null $blocks
+     *        pre-parsed caption blocks; null uses the file bound at construction
      * @return array{
      *   captions: int,
      *   analyzed: int,
@@ -61,11 +95,20 @@ final class ReadabilityChecker
      * }
      */
     public function analyze(
-        array $blocks,
+        ?array $blocks = null,
         ?float $maxCps = null,
         ?int $maxCpl = null,
         ?int $maxLines = null
     ): array {
+        if ($blocks === null) {
+            $blocks = $this->blocks;
+        }
+        if ($blocks === null) {
+            throw new \InvalidArgumentException(
+                'no subtitle file was bound at construction and no caption blocks were passed to analyze()'
+            );
+        }
+
         $maxCps = $maxCps ?? self::DEFAULT_MAX_CPS;
         $maxCpl = $maxCpl ?? self::DEFAULT_MAX_CPL;
         $maxLines = $maxLines ?? self::DEFAULT_MAX_LINES;
@@ -179,5 +222,29 @@ final class ReadabilityChecker
             'problems_by_type' => $byType,
             'problems' => $problems,
         ];
+    }
+
+    /**
+     * A caption is flagged "critical" when its value exceeds twice the limit,
+     * otherwise "minor". LLM consumers can sort/prioritize without
+     * re-deriving the math.
+     */
+    private static function severity(int|float $value, int|float $limit): string
+    {
+        return $value > 2 * $limit ? 'critical' : 'minor';
+    }
+
+    /** @return list<array{start: float, end: float, lines: list<string>}> */
+    private static function loadBlocks(string $file): array
+    {
+        if (!is_file($file) || !is_readable($file)) {
+            throw new \InvalidArgumentException('subtitle file does not exist or is not readable: ' . $file);
+        }
+
+        try {
+            return Subtitles::loadFromFile($file)->getInternalFormat();
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('could not parse the subtitle file: ' . $file . ' (' . $e->getMessage() . ')', 0, $e);
+        }
     }
 }

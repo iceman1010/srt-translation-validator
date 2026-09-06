@@ -4,7 +4,7 @@
     "keywords": ["subtitles", "srt", "webvtt", "translation", "validator"],
     "license": "proprietary",
     "require": {
-        "php": "^7.4|^8.0",
+        "php": "^8.0",
         "mantas-done/subtitles": "^1.0",
         "patrickschur/language-detection": "^5.3"
     },

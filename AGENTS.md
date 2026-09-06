@@ -46,3 +46,14 @@
 - Don't revert changes without asking first.
 - If multiple features are being worked on, confirm with the user before
   bundling them into a single commit or splitting them.
+
+### Editing Code — Non-Negotiable Discipline
+- Make minimal, scoped edits. NEVER replace a large block that contains
+  unrelated code (a helper was silently deleted that way once). Target exact
+  symbols, or rewrite the whole file in a single Write.
+- Probe uncertain runtime behavior with a quick `php -r` run BEFORE writing
+  code or tests that assume it. Never assert behavior you have not observed.
+- After EVERY source edit: `php -l` the touched files and run the full suite
+  (`vendor/bin/phpunit tests`) before moving on. Smoke-test the CLI when a
+  user-facing path changed. Never leave a known breakage behind to "fix in
+  the next edit" — if something broke, stop and repair it immediately.

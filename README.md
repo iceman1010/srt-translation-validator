@@ -81,7 +81,7 @@ You don't need to write any code. Download the pre-built `srt-translation-valida
 
 ## Requirements
 
-- PHP 7.4+ on your machine (no Composer, no composer packages needed)
+- PHP 8.0+ on your machine (no Composer, no composer packages needed)
 
 ## Downloading
 
@@ -370,7 +370,7 @@ Call the validation logic directly from your own PHP code via Composer.
 
 ## Requirements
 
-- PHP 7.4+ (8.x recommended)
+- PHP 8.0+
 - [Composer](https://getcomposer.org/)
 - Extension `mbstring`
 
@@ -658,29 +658,45 @@ blocks and negative timestamps.
 
 The advisory per-caption audit behind the `--readability` CLI mode (see
 above) is its own class, `ReadabilityChecker`. It never touches the verdict
-machinery: you hand it parsed subtitle blocks and get back every caption that
-exceeds the limits. Files are parsed with `Done\Subtitles\Subtitles`, which
-this package installs as a dependency:
+machinery: give it a subtitle file and get back every caption that exceeds
+the limits. Parsing (.srt and .vtt) is built in - no need to touch the
+subtitles library yourself:
 
 ```php
 <?php
 
 require 'vendor/autoload.php';
 
-use Done\Subtitles\Subtitles;
 use SrtValidator\ReadabilityChecker;
 
-// Same loader the CLI uses; accepts .srt and .vtt
-$blocks = Subtitles::loadFromFile('Movie.de.srt')->getInternalFormat();
+// Option 1: bind a file at construction; analyze() then needs no arguments
+$checker = new ReadabilityChecker('Movie.de.srt');
+$analysis = $checker->analyze();
 
-$checker = new ReadabilityChecker();
+// Option 2: one-shot on a file
+$analysis = (new ReadabilityChecker())->analyzeFile('Movie.de.srt');
 
-// Optional arguments override the limits (null keeps the default):
-//   maxCps  float  reading speed in characters/second  (default 20.0)
-//   maxCpl  int    characters per line                 (default 42)
-//   maxLines int   lines per caption                   (default 2)
-$analysis = $checker->analyze($blocks, 17.0, 37);
+// Option 3: content already in memory (downloaded, generated, ...)
+$analysis = (new ReadabilityChecker())->analyzeContent($srtString);
+```
 
+All three accept the same optional limits - `$maxCps` (float, reading speed
+in characters/second, default `20.0`), `$maxCpl` (int, characters per line,
+default `42`), `$maxLines` (int, lines per caption, default `2`); pass `null`
+(or omit trailing ones) to keep a default:
+
+```php
+$analysis = (new ReadabilityChecker())->analyzeFile('Movie.de.srt', 17.0, 37);
+```
+
+If you already hold parsed caption blocks (the internal format used
+throughout the library), `analyze($blocks)` still runs on them directly.
+
+Input errors throw instead of returning partial results: a file that does
+not exist or is not readable throws `InvalidArgumentException`; content the
+parser rejects throws `RuntimeException`.
+
+```php
 foreach ($analysis['problems'] as $problem) {
     printf(
         "#%d [%s] %s\n",
@@ -736,7 +752,7 @@ composer run build-phar
 ```
 
 The PHAR bundles `src/`, `bin/` and the production `vendor/` tree, so it runs
-on any machine with PHP 7.4+. The GitHub repository used by `--update` is
+on any machine with PHP 8.0+. The GitHub repository used by `--update` is
 auto-detected from the `origin` remote and embedded into the PHAR; override it
 in `build/build-phar.php` if needed.
 
