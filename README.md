@@ -550,6 +550,73 @@ The captions are aligned on the timeline before comparison (see
 reported as `merged_captions`/`split_captions` warnings instead of cascades
 of false mismatches.
 
+## JSON output from PHP
+
+There is no separate JSON model to learn: the CLI's `--json` output is
+exactly the `validate()` array above, run through `json_encode()` with three
+flags. In your own code you normally skip JSON entirely and work with the
+array - but when you do need the same output (to store a report, feed a
+pipeline, or serve it from an API), it is one call:
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use SrtValidator\SrtTranslationValidator;
+
+$result = (new SrtTranslationValidator())->validate(
+    'path/to/original.srt',
+    'path/to/translation.srt',
+    'de'
+);
+
+// Same encoding the CLI uses. JSON_UNESCAPED_UNICODE keeps umlauts,
+// cyrillic etc. readable; drop JSON_PRETTY_PRINT for compact output.
+$json = json_encode(
+    $result,
+    JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+);
+
+file_put_contents('report.json', $json . "\n");
+
+// Or serve it directly:
+// header('Content-Type: application/json');
+// echo $json;
+```
+
+The one difference: the CLI wraps the array in a small envelope before
+encoding, adding `result` (`'passed'`/`'failed'`), the file paths, `language`,
+`timestamp_tolerance`, `defect_count` and a `defects_by_type` summary. If a
+consumer of yours expects that exact CLI shape, replicate it in a few lines:
+
+```php
+$defects = array_values($result['defects']);
+$byType  = [];
+foreach ($defects as $defect) {
+    $byType[$defect['type']] = ($byType[$defect['type']] ?? 0) + 1;
+}
+ksort($byType);
+
+$envelope = [
+    'valid'        => (bool)$result['valid'],
+    'result'       => $result['valid'] ? 'passed' : 'failed',
+    'original'     => 'path/to/original.srt',
+    'translation'  => 'path/to/translation.srt',
+    'language'     => 'de',
+    'defect_count' => count($defects),
+    'error_count'   => $result['error_count'],
+    'warning_count' => $result['warning_count'],
+    'defects_by_type' => $byType,
+    'defects'      => $defects,
+    'quality'      => $result['quality'],
+];
+```
+
+The same applies to the readability audit: `ReadabilityChecker::analyze()`
+returns an array, and `json_encode($analysis, ...same flags...)` gives you
+the `--readability --json` payload.
+
 ## Validation of file format only
 
 If you only need to check the SRT/WebVTT structure of one file:
