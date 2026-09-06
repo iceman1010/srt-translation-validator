@@ -587,6 +587,67 @@ un-numbered cues, `X1:Y1` coordinate extensions, BOM and CRLF/CR line
 endings, and for WebVTT: cue identifiers/settings, `NOTE`, `STYLE`, `REGION`
 blocks and negative timestamps.
 
+## Readability audit from PHP
+
+The advisory per-caption audit behind the `--readability` CLI mode (see
+above) is its own class, `ReadabilityChecker`. It never touches the verdict
+machinery: you hand it parsed subtitle blocks and get back every caption that
+exceeds the limits. Files are parsed with `Done\Subtitles\Subtitles`, which
+this package installs as a dependency:
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use Done\Subtitles\Subtitles;
+use SrtValidator\ReadabilityChecker;
+
+// Same loader the CLI uses; accepts .srt and .vtt
+$blocks = Subtitles::loadFromFile('Movie.de.srt')->getInternalFormat();
+
+$checker = new ReadabilityChecker();
+
+// Optional arguments override the limits (null keeps the default):
+//   maxCps  float  reading speed in characters/second  (default 20.0)
+//   maxCpl  int    characters per line                 (default 42)
+//   maxLines int   lines per caption                   (default 2)
+$analysis = $checker->analyze($blocks, 17.0, 37);
+
+foreach ($analysis['problems'] as $problem) {
+    printf(
+        "#%d [%s] %s\n",
+        $problem['caption'],   // 1-based caption number
+        $problem['severity'],  // 'critical' or 'minor'
+        $problem['text']
+    );
+    foreach ($problem['issues'] as $issue) {
+        printf(
+            "  - %s: %s exceeds limit %s (%s)\n",
+            $issue['type'],    // reading_speed | line_length | line_count
+            $issue['value'],
+            $issue['limit'],
+            $issue['severity']
+        );
+    }
+}
+
+if ($analysis['problems'] === []) {
+    echo "Every caption is within the limits.\n";
+}
+```
+
+The return value also carries the file-wide summary: `captions`, `analyzed`
+(captions long enough to measure reading speed — cues under `0.2s` have
+`cps` null), `avg_cps`, `max_cps`/`max_cps_caption`, `max_cpl`/
+`max_cpl_caption`, `problems_by_type` (counts per issue type) and the
+`thresholds` actually used. Severity works as in the CLI: a value above
+*twice* its limit is `critical`, otherwise `minor`, and a caption is
+`critical` when any of its issues is.
+
+The `--limit` and `--worst-first` CLI options are presentation only — slice
+and sort `$analysis['problems']` yourself if you want the same behavior.
+
 ## Development
 
 Everything below is for people working on the *validator itself*.
