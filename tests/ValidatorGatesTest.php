@@ -41,6 +41,48 @@ class ValidatorGatesTest extends TestCase
         $this->assertSame('zh', ScriptChecker::baseLanguage('zh-tw'));
     }
 
+    public function testBaseLanguageCanonicalizesCodeFamiliesViaLingua(): void
+    {
+        // ISO 639-2/3 and legacy codes resolve to their ISO 639-1 form.
+        $this->assertSame('de', ScriptChecker::baseLanguage('deu'));
+        $this->assertSame('de', ScriptChecker::baseLanguage('ger'));
+        $this->assertSame('fr', ScriptChecker::baseLanguage('fra'));
+        $this->assertSame('cs', ScriptChecker::baseLanguage('ces'));
+        $this->assertSame('zh', ScriptChecker::baseLanguage('zho'));
+        $this->assertSame('he', ScriptChecker::baseLanguage('iw'));
+        $this->assertSame('sr', ScriptChecker::baseLanguage('sr-Latn'));
+    }
+
+    public function testBaseLanguageKeepsCodesWithoutIso639_1Distinct(): void
+    {
+        // Cebuano and Filipino have no ISO 639-1 code: they must stay
+        // distinct so same-language comparisons can never match them.
+        $ceb = ScriptChecker::baseLanguage('ceb');
+        $fil = ScriptChecker::baseLanguage('fil');
+
+        $this->assertNotSame($ceb, $fil);
+        $this->assertNotSame('', $ceb);
+        $this->assertNotSame('', $fil);
+    }
+
+    public function testBaseLanguageUnparseableInputFallsBackLowercased(): void
+    {
+        $this->assertSame('???', ScriptChecker::baseLanguage(' ??? '));
+    }
+
+    public function testScriptGateRunsForIso639ThreeLetterInput(): void
+    {
+        // "zho" previously missed the language map and silently skipped the
+        // script gate; canonicalized it runs with the Chinese allow-list.
+        $result = (new ScriptChecker())->check(
+            [['lines' => ['你好世界']]],
+            'zho'
+        );
+
+        $this->assertNotNull($result);
+        $this->assertSame(0, $result['foreign_chars']);
+    }
+
     public function testSameLanguagePassthroughByDeclaration(): void
     {
         // An unchanged English copy offered as an "en" translation: with the

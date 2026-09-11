@@ -20,6 +20,11 @@ namespace SrtValidator;
  * ->analyze($blocks) still accepts pre-parsed caption blocks when you
  * already have them. Unreadable input throws InvalidArgumentException,
  * unparseable input RuntimeException; there are no partial results.
+ *
+ * Limits come from resources/readability-profiles.json, resolved by the
+ * optional $lang argument (BCP-47-ish code; null uses the default
+ * profile, currently 42 cpl / 20 cps / 2 lines). Explicit numeric
+ * arguments always override the profile; see ReadabilityProfile.
  */
 final class ReadabilityChecker
 {
@@ -48,13 +53,13 @@ final class ReadabilityChecker
     }
 
     /** Load, parse and audit a subtitle file (.srt or .vtt) in one call. */
-    public function analyzeFile(string $file, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null): array
+    public function analyzeFile(string $file, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null, ?string $lang = null): array
     {
-        return $this->analyze(self::loadBlocks($file), $maxCps, $maxCpl, $maxLines);
+        return $this->analyze(self::loadBlocks($file), $maxCps, $maxCpl, $maxLines, $lang);
     }
 
     /** Parse and audit subtitle content (.srt or .vtt) held in memory. */
-    public function analyzeContent(string $content, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null): array
+    public function analyzeContent(string $content, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null, ?string $lang = null): array
     {
         try {
             $blocks = SubtitleLoader::loadString($content)->getInternalFormat();
@@ -62,7 +67,7 @@ final class ReadabilityChecker
             throw new \RuntimeException('could not parse the subtitle content: ' . $e->getMessage(), 0, $e);
         }
 
-        return $this->analyze($blocks, $maxCps, $maxCpl, $maxLines);
+        return $this->analyze($blocks, $maxCps, $maxCpl, $maxLines, $lang);
     }
 
     /**
@@ -77,6 +82,7 @@ final class ReadabilityChecker
      *   max_cpl: int,
      *   max_cpl_caption: int|null,
      *   thresholds: array{max_cps: float, max_cpl: int, max_lines: int},
+     *   language: string|null,
      *   problems_by_type: array<string, int>,
      *   problems: list<array{
      *     caption: int,
@@ -96,7 +102,8 @@ final class ReadabilityChecker
         ?array $blocks = null,
         ?float $maxCps = null,
         ?int $maxCpl = null,
-        ?int $maxLines = null
+        ?int $maxLines = null,
+        ?string $lang = null
     ): array {
         if ($blocks === null) {
             $blocks = $this->blocks;
@@ -107,9 +114,10 @@ final class ReadabilityChecker
             );
         }
 
-        $maxCps = $maxCps ?? self::DEFAULT_MAX_CPS;
-        $maxCpl = $maxCpl ?? self::DEFAULT_MAX_CPL;
-        $maxLines = $maxLines ?? self::DEFAULT_MAX_LINES;
+        $profile = ReadabilityProfile::for($lang);
+        $maxCps = $maxCps ?? $profile['cps'];
+        $maxCpl = $maxCpl ?? $profile['cpl'];
+        $maxLines = $maxLines ?? $profile['lines'];
 
         $totalChars = 0;
         $totalDuration = 0.0;
@@ -217,6 +225,7 @@ final class ReadabilityChecker
             'max_cpl' => $maxObservedCpl,
             'max_cpl_caption' => $maxObservedCplCaption,
             'thresholds' => ['max_cps' => $maxCps, 'max_cpl' => $maxCpl, 'max_lines' => $maxLines],
+            'language' => $lang,
             'problems_by_type' => $byType,
             'problems' => $problems,
         ];

@@ -261,4 +261,33 @@ class ReadabilityCheckerTest extends TestCase
 
         (new ReadabilityChecker())->analyze();
     }
+
+    public function testChineseProfileTightensLineLengthLimit(): void
+    {
+        // 20 chars over 5s = 4 cps: fine everywhere, but the 20-char line
+        // is fine at the default 42 cpl and over the zh profile limit of 16.
+        $blocks = [$this->block(0, 5, [str_repeat('我', 20)])];
+
+        $default = (new ReadabilityChecker())->analyze($blocks);
+        $zh = (new ReadabilityChecker())->analyze($blocks, null, null, null, 'zh');
+
+        $this->assertSame([], $default['problems']);
+        $this->assertNull($default['language']);
+        $this->assertNotEmpty($zh['problems']);
+        $this->assertSame('zh', $zh['language']);
+        $this->assertSame(16, $zh['thresholds']['max_cpl']);
+        $this->assertSame(9.0, $zh['thresholds']['max_cps']);
+    }
+
+    public function testExplicitLimitOverridesProfile(): void
+    {
+        $blocks = [$this->block(0, 5, [str_repeat('我', 20)])];
+
+        $analysis = (new ReadabilityChecker())->analyze($blocks, null, 20, null, 'zh');
+
+        $this->assertSame([], $analysis['problems']);
+        $this->assertSame('zh', $analysis['language']);
+        $this->assertSame(9.0, $analysis['thresholds']['max_cps']);
+        $this->assertSame(20, $analysis['thresholds']['max_cpl']);
+    }
 }

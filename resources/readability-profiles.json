@@ -1,0 +1,7 @@
+{
+    "default": { "cps": 20.0, "cpl": 42, "lines": 2 },
+    "languages": {
+        "zh": { "cps": 9.0, "cpl": 16, "lines": 2 },
+        "ja": { "cps": 4.0, "cpl": 13, "lines": 2 }
+    }
+}

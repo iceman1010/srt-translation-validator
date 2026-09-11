@@ -6,7 +6,8 @@
     "require": {
         "php": "^8.0",
         "mantas-done/subtitles": "^0.3.10 || ^1.0",
-        "patrickschur/language-detection": "^5.3"
+        "patrickschur/language-detection": "^5.3",
+        "whitecube/lingua": "^1.1"
     },
     "autoload": {
         "psr-4": {

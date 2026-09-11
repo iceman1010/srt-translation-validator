@@ -146,9 +146,9 @@ compares them, and prints a human-readable report.
 | `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
 | `--max-errors=N`       | Fail when more than N error-severity defects are found, regardless of the ratios (default: no limit). |
 | `--readability`        | Readability audit of a single subtitle file: runs a per-caption check against readability limits and lists every caption that exceeds them. Purely advisory - no verdict, no defects, exit code is 0 when every caption is clean and 1 when problems are found. Takes exactly one file. |
-| `--max-cps=F`          | Max characters per second for the `--readability` audit (default: `20.0`). |
-| `--max-cpl=N`          | Max characters per line for the `--readability` audit (default: `42`). |
-| `--max-lines=N`        | Max lines per caption for the `--readability` audit (default: `2`). |
+| `--max-cps=F`          | Max characters per second for the `--readability` audit. Default comes from the language profile (20.0 for the default profile). |
+| `--max-cpl=N`          | Max characters per line for the `--readability` audit. Default comes from the language profile (42 for the default profile). |
+| `--max-lines=N`        | Max lines per caption for the `--readability` audit. Default comes from the language profile (2 for the default profile). |
 | `--limit=N`            | Cap the `--readability` listing to the first N problematic captions. File-wide stats and `problems_by_type` still cover every caption (default: show all). |
 | `--worst-first`        | In the `--readability` listing, order problems for triage: critical before minor, then fastest reading speed first. |
 | `-h, --help`           | Show usage help.                                                         |
@@ -296,9 +296,9 @@ line per exceeded quality limit.
 ## Readability audit
 
 Pass `--readability` with **exactly one** subtitle file to list every caption
-that is hard to read. It is a separate, advisory mode: no verdict, no defects,
-no language detection - just the captions that exceed the readability limits,
-with their exact values against the limits.
+that is hard to read. It is a separate, advisory mode: no verdict, no defects -
+just the captions that exceed the readability limits, with their exact values
+against the limits.
 
 ```bash
 srt-translation-validator Movie.de.srt --readability
@@ -307,9 +307,23 @@ srt-translation-validator Movie.de.srt --readability --max-cps 15 --max-cpl 37
 srt-translation-validator Movie.de.srt --readability --limit 50 --worst-first
 ```
 
-Limits (ISO-style subtitle guidelines): `--max-cps` characters per second
-(default `20`), `--max-cpl` characters per line (default `42`), `--max-lines`
-(default `2`).
+Limits are **per-language**, resolved from `resources/readability-profiles.json`
+(the file ships with the tool and the PHAR). The language comes from `--lang`
+or is auto-detected from the file; codes are canonicalized with
+[whitecube/lingua](https://packagist.org/packages/whitecube/lingua), so
+`zh`, `zho`, `zh-Hant-TW` and `zh_TW` all resolve to the Chinese profile.
+Explicit `--max-cps` / `--max-cpl` / `--max-lines` always override the profile.
+Shipped values follow published subtitling standards:
+
+| Profile | Chars/line | Chars/sec | Source |
+|---|---:|---:|---|
+| default (Latin/Cyrillic/Greek, ...) | 42 | 20.0 | Netflix Latin-script TTSG; BBC uses 37 |
+| `zh` | 16 | 9.0 | Netflix Chinese (Simplified & Traditional) TTSG |
+| `ja` | 13 | 4.0 | Netflix Japanese TTSG (full-width characters) |
+
+Every other language falls back to the default profile. Adding a language is
+a one-line change in the JSON (entries may be partial - only the values that
+differ from the default are needed).
 
 Every problem carries a severity: **`critical`** when a value exceeds *twice*
 its limit, otherwise **`minor`**. A caption is `critical` when any of its

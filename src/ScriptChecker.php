@@ -2,6 +2,8 @@
 
 namespace SrtValidator;
 
+use WhiteCube\Lingua\Service as LinguaService;
+
 /**
  * Detects translation letters written in scripts that do not belong to the
  * expected target language. This catches the "character hallucination"
@@ -150,18 +152,36 @@ final class ScriptChecker
     }
 
     /**
-     * Reduces a language tag to its base language: lowercased, with any
-     * regional suffix stripped ("es-mx" / "pt_BR" -> "es" / "pt"), so
-     * comparisons never fail on the region part.
+     * Reduces a language tag to its canonical base language, canonicalized
+     * through whitecube/lingua: regional/script suffixes are stripped
+     * ("es-mx" / "pt_BR" / "sr-Latn" -> "es" / "pt" / "sr"), ISO 639-2/3
+     * codes are converted to their 639-1 form ("deu"/"ger" -> "de",
+     * "zho" -> "zh") and legacy codes are modernized ("iw" -> "he"), so
+     * comparisons never fail on the code family either.
+     *
+     * Languages without an ISO 639-1 code keep their normalized tag
+     * ("ceb", "fil") so distinct languages never compare equal; completely
+     * unparseable input is returned lowercased as-is and will simply miss
+     * the language maps (gates skip).
      */
     public static function baseLanguage(string $language): string
     {
         $language = strtolower(trim($language));
-        $dash = strcspn($language, '-_');
-        if ($dash > 0 && $dash < strlen($language)) {
-            $language = substr($language, 0, $dash);
+        if ($language === '') {
+            return '';
         }
-        return $language;
+
+        try {
+            $service = LinguaService::create($language);
+            $base = strtolower((string)$service->toISO_639_1());
+            if ($base !== '') {
+                return $base;
+            }
+
+            return strtolower((string)$service);
+        } catch (\Throwable $e) {
+            return $language;
+        }
     }
 
     /**

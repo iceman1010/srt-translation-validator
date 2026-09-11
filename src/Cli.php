@@ -114,12 +114,17 @@ final class Cli
             return self::fail('could not parse the subtitle file: ' . $file, $json);
         }
 
+        // Profile lookup needs a language: explicit --lang wins, otherwise
+        // the file's dominant language is detected.
+        $lang = $options['lang'] ?? self::autoDetectLanguage($file, self::createLanguageDetector());
+
         $checker = new ReadabilityChecker();
         $analysis = $checker->analyze(
             $blocks,
             $options['max_cps'],
             $options['max_cpl'],
-            $options['max_lines']
+            $options['max_lines'],
+            $lang
         );
 
         // Ordering and listing limits only affect what is printed, never the
@@ -829,6 +834,7 @@ TXT;
         return self::encodeJson([
             'file' => $file,
             'mode' => 'readability',
+            'language' => $analysis['language'],
             'captions' => $analysis['captions'],
             'analyzed' => $analysis['analyzed'],
             'avg_cps' => $analysis['avg_cps'],
@@ -856,6 +862,9 @@ TXT;
         $out .= $bar . "\n\n";
 
         $out .= self::line('File', $file);
+        if ($analysis['language'] !== null) {
+            $out .= self::line('Language', $analysis['language']);
+        }
         $out .= self::line('Captions', (string)$analysis['captions']);
         $out .= self::line('Avg reading speed', sprintf('%.1f cps', $analysis['avg_cps']));
         $out .= self::line('Max reading speed', sprintf('%.1f cps (caption #%d)', $analysis['max_cps'], $analysis['max_cps_caption']));

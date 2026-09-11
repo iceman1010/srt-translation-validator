@@ -57,7 +57,7 @@ foreach ($iterator as $file) {
     $relative = substr($path, strlen($root) + 1);
     $relative = str_replace('\\', '/', $relative);
 
-    if (!preg_match('#^(src|bin|vendor)(?:/|$)#', $relative)) {
+    if (!preg_match('#^(src|bin|vendor|resources)(?:/|$)#', $relative)) {
         continue;
     }
     // Skip hidden files/directories anywhere below the packaged roots.
