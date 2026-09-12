@@ -32,6 +32,10 @@ final class SrtTranslationValidator
     private const DEFAULT_MAX_LOSS_RATIO = 0.01;
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
     private const DEFAULT_MAX_MERGE_RATIO = 0.10;
+    /** Upper bound of the adaptive merge tolerance for dense target languages. */
+    private const MAX_ADAPTIVE_MERGE_RATIO = 0.40;
+    /** Upper bound of the cpl density factor between source and target. */
+    private const MAX_MERGE_DENSITY_FACTOR = 4.0;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
     private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;
     /** Zero tolerance by default: any foreign-script letter is suspicious. */
@@ -60,10 +64,11 @@ final class SrtTranslationValidator
 
     private float $maxLossRatio = self::DEFAULT_MAX_LOSS_RATIO;
     private float $maxDriftRatio = self::DEFAULT_MAX_DRIFT_RATIO;
-    private float $maxMergeRatio = self::DEFAULT_MAX_MERGE_RATIO;
     private float $maxVerbatimRatio = self::DEFAULT_MAX_VERBATIM_RATIO;
     private float $maxNearVerbatimRatio = self::DEFAULT_MAX_NEAR_VERBATIM_RATIO;
     private float $maxScriptRatio = self::DEFAULT_MAX_SCRIPT_RATIO;
+    /** Explicit merge tolerance override; null = derive it from the language pair. */
+    private ?float $mergeRatioOverride = null;
     /** null = no error-count gate (ratio thresholds decide alone). */
     private ?int $maxErrors = null;
     private bool $strict = false;
@@ -118,7 +123,7 @@ final class SrtTranslationValidator
     public function setMaxMergeRatio(?float $ratio): void
     {
         if ($ratio !== null) {
-            $this->maxMergeRatio = $ratio;
+            $this->mergeRatioOverride = $ratio;
         }
     }
 
@@ -292,6 +297,11 @@ final class SrtTranslationValidator
             ? round($script['foreign_chars'] / $script['letters'], 4)
             : 0.0;
 
+        // Merge tolerance: explicit override wins, otherwise it scales with
+        // the language pair's information density (see adaptiveMergeThreshold).
+        $mergeThreshold = $this->mergeRatioOverride
+            ?? $this->adaptiveMergeThreshold($originalBlocks, $expectedLanguage);
+
         if ($script !== null && $scriptRatio > $this->maxScriptRatio) {
             $scriptSummary = implode(', ', array_map(
                 static fn (string $name, int $count): string => "{$name} ({$count})",
@@ -343,7 +353,7 @@ final class SrtTranslationValidator
                 'content_loss' => $this->maxLossRatio,
                 'timestamp_drift' => $this->maxDriftRatio,
                 'partial_translation' => null,
-                'merged' => $this->maxMergeRatio,
+                'merged' => $mergeThreshold,
                 // Advisory while a passthrough: an unchanged copy is the
                 // expected output, so neither copy ratio gates anything.
                 'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
@@ -357,6 +367,84 @@ final class SrtTranslationValidator
             'max_errors' => $this->maxErrors,
             'strict' => $this->strict,
         ]);
+    }
+
+    /**
+     * Merge-ratio threshold for this job when no explicit override was set:
+     * scaled from the language pair's information density. When the target
+     * language renders the same content in fewer characters (en -> ja: 42
+     * vs 13 chars/line in resources/readability-profiles.json), merged cues
+     * are expected re-segmentation, not sloppiness, so the 10% base
+     * tolerance grows with the density ratio - bounded, so the gate can
+     * never be disabled:
+     *
+     *   factor    = clamp(source_cpl / target_cpl, 1, 4)
+     *   threshold = min(10% x factor, 40%)
+     *
+     * Same-density pairs and verbose targets keep 10% (the calibrated
+     * corpus behaviour); unknown languages or a failing profile lookup
+     * fall back to the base constant. The source language comes from the
+     * declaration (setSourceLanguage) or, as a best effort, from detection
+     * over the source captions - detection result is used only here and
+     * never feeds the same-language passthrough decision.
+     *
+     * @param list<array{start: float, end: float, lines: list<string>}> $sourceBlocks
+     */
+    private function adaptiveMergeThreshold(array $sourceBlocks, string $targetLanguage): float
+    {
+        $sourceLanguage = $this->sourceLanguage ?? $this->detectDominantLanguage($sourceBlocks);
+        if ($sourceLanguage === null || $sourceLanguage === ScriptChecker::baseLanguage($targetLanguage)) {
+            return self::DEFAULT_MAX_MERGE_RATIO;
+        }
+
+        try {
+            $sourceCpl = ReadabilityProfile::for($sourceLanguage)['cpl'];
+            $targetCpl = ReadabilityProfile::for($targetLanguage)['cpl'];
+        } catch (\Throwable $e) {
+            return self::DEFAULT_MAX_MERGE_RATIO;
+        }
+
+        $factor = min(max($sourceCpl / $targetCpl, 1.0), self::MAX_MERGE_DENSITY_FACTOR);
+
+        return min(self::DEFAULT_MAX_MERGE_RATIO * $factor, self::MAX_ADAPTIVE_MERGE_RATIO);
+    }
+
+    /**
+     * Dominant language of the given captions, or null when it cannot be
+     * determined. Best-effort sampling: hearing-impaired annotations and
+     * music cues are skipped, the sample is capped.
+     *
+     * @param list<array{lines: list<string>}> $blocks
+     */
+    private function detectDominantLanguage(array $blocks): ?string
+    {
+        $sample = '';
+        foreach ($blocks as $block) {
+            $text = trim(implode(' ', $block['lines']));
+            if (mb_strlen($text) < 3 || preg_match('/^\[.*\]$/', $text) || preg_match('/♪|♫/', $text)) {
+                continue;
+            }
+            $sample .= ' ' . $text;
+            if (mb_strlen($sample) >= 8000) {
+                break;
+            }
+        }
+
+        $sample = trim($sample);
+        if ($sample === '') {
+            return null;
+        }
+
+        try {
+            $detections = $this->languageDetector->detect($sample)->close();
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (!$detections) {
+            return null;
+        }
+
+        return ScriptChecker::baseLanguage((string)array_key_first($detections));
     }
 
     /**
@@ -583,11 +671,17 @@ final class SrtTranslationValidator
                         $mergedCaptions += count($indices);
                         $first = $indices[0] + 1;
                         $last = $indices[count($indices) - 1] + 1;
+                        $single = $first === $last;
                         $defects[] = [
                             'type' => 'merged_captions',
                             'severity' => 'warning',
-                            'message' => 'Original captions #' . ($first === $last ? $first : "{$first}-{$last}")
-                                . ' are merged into translation caption #' . ($event['before_translation_index'] + 1),
+                            'message' => sprintf(
+                                'Original caption%s #%s %s merged into translation caption #%d',
+                                $single ? '' : 's',
+                                $single ? $first : "{$first}-{$last}",
+                                $single ? 'is' : 'are',
+                                $event['before_translation_index'] + 1
+                            ),
                             'source_start_caption' => $first,
                             'source_end_caption' => $last,
                             'translation_caption' => $event['before_translation_index'] + 1,

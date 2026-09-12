@@ -118,14 +118,20 @@ final class Cli
         // the file's dominant language is detected.
         $lang = $options['lang'] ?? self::autoDetectLanguage($file, self::createLanguageDetector());
 
-        $checker = new ReadabilityChecker();
-        $analysis = $checker->analyze(
-            $blocks,
-            $options['max_cps'],
-            $options['max_cpl'],
-            $options['max_lines'],
-            $lang
-        );
+        try {
+            $checker = new ReadabilityChecker();
+            $analysis = $checker->analyze(
+                $blocks,
+                $options['max_cps'],
+                $options['max_cpl'],
+                $options['max_lines'],
+                $lang
+            );
+        } catch (\Throwable $e) {
+            // Profile loading fails loudly (missing/corrupt profiles file);
+            // surface that as a usage error instead of an uncaught crash.
+            return self::fail('readability audit failed: ' . $e->getMessage(), $json);
+        }
 
         // Ordering and listing limits only affect what is printed, never the
         // file-wide stats or the exit code.

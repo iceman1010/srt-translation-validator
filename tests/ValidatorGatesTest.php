@@ -287,4 +287,132 @@ class ValidatorGatesTest extends TestCase
         $ms = (int)round(($seconds - (int)$seconds) * 1000);
         return sprintf('%02d:%02d:%02d,%03d', 0, intdiv((int)$seconds, 60), (int)$seconds % 60, $ms);
     }
+
+    /**
+     * A 12-cue English source plus a translation that merges cues #4 and
+     * #9-#10 into their neighbours (25% merged). $text factory receives the
+     * 0-based cue index and returns that cue's translated text.
+     *
+     * @param callable(int): string $text
+     * @return array{0: string, 1: string} source path, translation path
+     */
+    private function mergeFixture(callable $text, string $translationName): array
+    {
+        $source = $this->writeSrt('source.en.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, "English dialogue line number " . ($i + 1) . " with some words"],
+            range(0, 11)
+        ));
+
+        // Drop cues #4 (index 3) and #9-#10 (indices 8, 9): the remaining
+        // nine translation cues anchor exactly, the holes are merges.
+        $kept = array_filter(range(0, 11), fn (int $i): bool => !in_array($i, [3, 8, 9], true));
+        $translation = $this->writeSrt($translationName, array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, $text($i)],
+            array_values($kept)
+        ));
+
+        return [$source, $translation];
+    }
+
+    public function testMergedCaptionMessagesUseSingularAndPluralGrammar(): void
+    {
+        [$source, $translation] = $this->mergeFixture(
+            fn (int $i): string => '日本語のセリフ' . ($i + 1),
+            'translation.ja.srt'
+        );
+        $this->validator->setSourceLanguage('en');
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $messages = array_map(
+            fn (array $d): string => $d['message'],
+            array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'merged_captions')
+        );
+        $this->assertSame([
+            'Original caption #4 is merged into translation caption #4',
+            'Original captions #9-10 are merged into translation caption #8',
+        ], $messages);
+    }
+
+    public function testDenseTargetLanguageGetsAdaptiveMergeTolerance(): void
+    {
+        // 25% merged: over the 10% base tolerance, under the en->ja
+        // adaptive tolerance (10% x 42/13 cpl = ~32%).
+        [$source, $translation] = $this->mergeFixture(
+            fn (int $i): string => '日本語のセリフ' . ($i + 1),
+            'translation.ja.srt'
+        );
+        $this->validator->setSourceLanguage('en');
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0.25, $result['quality']['ratios']['merged']);
+        $this->assertEqualsWithDelta(0.3231, $result['quality']['thresholds']['merged'], 0.001);
+    }
+
+    public function testAdaptiveToleranceUsesDetectedSourceLanguage(): void
+    {
+        // No --source-lang: the source language is detected from the file.
+        [$source, $translation] = $this->mergeFixture(
+            fn (int $i): string => '日本語のセリフ' . ($i + 1),
+            'translation.ja.srt'
+        );
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $this->assertTrue($result['valid']);
+    }
+
+    public function testSameDensityPairsKeepBaseMergeTolerance(): void
+    {
+        // en -> de: both default profile (42 cpl), factor 1, threshold 10%.
+        [$source, $translation] = $this->mergeFixture(
+            fn (int $i): string => 'Deutsche Dialogzeile Nummer ' . ($i + 1) . ' mit einigen Wörtern',
+            'translation.de.srt'
+        );
+        $this->validator->setSourceLanguage('en');
+
+        $result = $this->validator->validate($source, $translation, 'de');
+
+        $this->assertFalse($result['valid']);
+        $this->assertContains('merged 25.00% exceeds the threshold 10.00%', $result['quality']['reasons']);
+    }
+
+    public function testVerboseTargetKeepsBaseMergeTolerance(): void
+    {
+        // ja -> en: the factor clamps at 1 (verbose targets merge less, not more).
+        // Japanese source, English translation missing the same cues.
+        $jaSource = $this->writeSrt('source.ja.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, '日本語のセリフ' . ($i + 1)],
+            range(0, 11)
+        ));
+        $kept = array_filter(range(0, 11), fn (int $i): bool => !in_array($i, [3, 8, 9], true));
+        $enTranslation = $this->writeSrt('translation.en.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, "English dialogue line number " . ($i + 1) . " with some words"],
+            array_values($kept)
+        ));
+        $this->validator->setSourceLanguage('ja');
+
+        $result = $this->validator->validate($jaSource, $enTranslation, 'en');
+
+        $this->assertFalse($result['valid']);
+        $this->assertContains('merged 25.00% exceeds the threshold 10.00%', $result['quality']['reasons']);
+    }
+
+    public function testExplicitMergeRatioOverridesAdaptiveTolerance(): void
+    {
+        [$source, $translation] = $this->mergeFixture(
+            fn (int $i): string => '日本語のセリフ' . ($i + 1),
+            'translation.ja.srt'
+        );
+        $this->validator->setSourceLanguage('en');
+        $this->validator->setMaxMergeRatio(0.05);
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $this->assertFalse($result['valid']);
+        $this->assertSame(0.05, $result['quality']['thresholds']['merged']);
+        $this->assertContains('merged 25.00% exceeds the threshold 5.00%', $result['quality']['reasons']);
+    }
 }

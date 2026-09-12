@@ -34,7 +34,7 @@ then judges the translation by how much is actually wrong:
 | `content_loss`       | source captions with no translation counterpart (content captions only - music/annotation cues excluded) | 1%            |
 | `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
 | `partial_translation`| translation characters detected in the wrong language (base-code comparison: `es-mx` target matches `es` detection) | advisory (no limit) |
-| `merged`             | source captions merged into neighbouring captions (content captions only) | 10%           |
+| `merged`             | source captions merged into neighbouring captions (content captions only) | 10%, adaptive up to 40% for dense targets (see below) |
 | `verbatim_copy`      | aligned captions identical to the source             | 50% (advisory during a same-language passthrough) |
 | `near_verbatim_copy` | aligned captions identical or >= 90% similar to the source (lightly edited passthrough) | 50% (advisory during a same-language passthrough) |
 | `unexpected_script`  | translation letters in a foreign script (not counting letters inherited from the source) | 0% (zero tolerance) |
@@ -50,6 +50,20 @@ then judges the translation by how much is actually wrong:
   `--max-merge-ratio`, `--max-verbatim-ratio` and
   `--max-script-ratio` (values between `0` and `1`); `--max-errors` fails a
   run with more than N error-severity defects regardless of the ratios.
+- **Adaptive merge tolerance**: when the target language renders the same
+  content in fewer characters, merged cues are expected re-segmentation
+  rather than sloppiness. Without `--max-merge-ratio`, the `merged` limit
+  scales with the language pair's density (from
+  `resources/readability-profiles.json`):
+
+      factor    = clamp(source_cpl / target_cpl, 1, 4)
+      threshold = min(10% x factor, 40%)
+
+  Example: `en -> ja` is 42 vs 13 chars/line, so the tolerance rises from
+  10% to ~32%; `de -> en` stays at 10%. The source language comes from
+  `--source-lang` or is detected from the source file (detection never
+  feeds the same-language passthrough decision). An explicit
+  `--max-merge-ratio` always wins.
 - **Same-language passthrough**: when the source file is already written in
   the target language, a verbatim copy is expected output, not a failure.
   Declare the source language with `--source-lang` (e.g. `--source-lang=bg`
@@ -140,7 +154,7 @@ compares them, and prints a human-readable report.
 | `--strict`             | Fail on any error-severity defect, ignoring the quality-ratio limits.    |
 | `--max-loss-ratio=F`   | Max share of source captions with no translation at all (default: `0.01`). |
 | `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). |
-| `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions (default: `0.10`). |
+| `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions. Default: derived from the language pair (see "Adaptive merge tolerance"), 0.10 for same-density pairs. |
 | `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
 | `--max-near-verbatim-ratio=F` | Max share of aligned captions that may be identical or >=90% similar to the source; catches copies with light cosmetic edits as `edited_copy` (default: `0.50`). |
 | `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
@@ -281,7 +295,7 @@ they are measured and reported but never flip the verdict.
 ------------------------------------------------------------------
 
   1. MERGED CAPTIONS [warning]
-Original captions #316 are merged into translation caption #316
+Original caption #316 is merged into translation caption #316
 
   ...
 
