@@ -69,7 +69,7 @@ class ScriptAndReadabilityTest extends TestCase
 
         $this->assertTrue($result['valid']);
         $this->assertSame(0.0, $result['quality']['ratios']['unexpected_script']);
-        $this->assertSame(0.0, $result['quality']['thresholds']['unexpected_script']);
+        $this->assertSame(0.01, $result['quality']['thresholds']['unexpected_script']);
         $this->assertCount(0, array_filter($result['defects'], fn ($d) => $d['type'] === 'unexpected_script'));
     }
 
@@ -255,12 +255,14 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertLessThan(0.5, $result['quality']['ratios']['unexpected_script']);
     }
 
-    public function testReadabilityIsReportedWithoutDefects(): void
+    public function testReadingSpeedWarningIsReported(): void
     {
         // Matching timings so no timestamp defects interfere: cue 1 shows a
-        // 50-char and a 29-char line (80 joined chars) over 2s = 40 cps.
+        // 50-char and a 29-char line (80 joined chars) over 2s = 40 cps -
+        // double the default 20 cps limit, so a warning (not an error). The
+        // source cue stays comfortably under its own limit (exemption off).
         $original = $this->write('original-r', [
-            [1.0, 3.0, ['This is an English line, everything fine.']],
+            [1.0, 3.0, ['A fine line.']],
             [4.0, 8.0, ['Everybody gets back to their seat.']],
             [9.0, 13.0, ['This is the last line of the recording.']],
         ]);
@@ -272,10 +274,19 @@ class ScriptAndReadabilityTest extends TestCase
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
-        // Readability is statistics only: no defect, no warning, valid verdict.
+        // Double the limit warns but keeps the verdict usable.
         $this->assertTrue($result['valid']);
-        $this->assertSame(0, $result['warning_count']);
-        $this->assertSame([], $result['defects']);
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame(1, $result['warning_count']);
+
+        $defect = $result['defects'][0];
+        $this->assertSame('reading_speed', $defect['type']);
+        $this->assertSame('warning', $defect['severity']);
+        $this->assertSame(1, $defect['caption_number']);
+        $this->assertSame(40.0, $defect['cps']);
+        $this->assertSame(20.0, $defect['cps_limit']);
+        $this->assertSame(2.0, $result['quality']['ratios']['reading_speed']);
+        $this->assertSame(5.0, $result['quality']['thresholds']['reading_speed']);
 
         $readability = $result['quality']['readability'];
         $this->assertSame(40.0, $readability['max_cps']);
@@ -284,6 +295,63 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertSame(1, $readability['max_cpl_caption']);
         $this->assertGreaterThan(0.0, $readability['avg_cps']);
         $this->assertLessThan(40.0, $readability['avg_cps']);
+    }
+
+    public function testUnreadableCaptionFailsValidation(): void
+    {
+        // 111 chars (60 + space + 50) over 1s = 111 cps: far beyond the 5x
+        // default limit (100), the caption cannot be read in its display
+        // time. The source cue stays under its own limit (exemption off).
+        $original = $this->write('original-u', [
+            [1.0, 2.0, ['Okay.']],
+            [4.0, 8.0, ['Everybody gets back to their seat.']],
+            [9.0, 13.0, ['This is the last line of the recording.']],
+        ]);
+        $translation = $this->write('unreadable', [
+            [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [4.0, 8.0, ['Rövid mondat.']],
+            [9.0, 13.0, ['Még egy rövid mondat.']],
+        ]);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertFalse($result['valid']);
+        $this->assertStringContainsString(
+            'reading speed',
+            implode(' ', $result['quality']['reasons'])
+        );
+
+        $defect = $result['defects'][0];
+        $this->assertSame('reading_speed', $defect['type']);
+        $this->assertSame('error', $defect['severity']);
+        $this->assertSame(111.0, $defect['cps']);
+        $this->assertSame(5.55, $result['quality']['ratios']['reading_speed']);
+    }
+
+    public function testInheritedOverloadIsExempt(): void
+    {
+        // The source cue itself is overloaded (59 chars over 1s = 59 cps,
+        // far beyond the default 20 cps limit); a faithful translation
+        // cannot fix the source's timing, so even an error-tier caption
+        // (111 cps) must not be flagged.
+        $original = $this->write('original-x', [
+            [1.0, 2.0, ['This line carries far too many characters inside.']],
+            [4.0, 8.0, ['Everybody gets back to their seat.']],
+            [9.0, 13.0, ['This is the last line of the recording.']],
+        ]);
+        $translation = $this->write('inherited', [
+            [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [4.0, 8.0, ['Rövid mondat.']],
+            [9.0, 13.0, ['Még egy rövid mondat.']],
+        ]);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame(0, $result['warning_count']);
+        $this->assertSame([], $result['defects']);
+        $this->assertSame(0.0, $result['quality']['ratios']['reading_speed']);
     }
 
     /**
@@ -307,7 +375,7 @@ class ScriptAndReadabilityTest extends TestCase
     {
         $cues = [];
         foreach ($linesGroups as $i => $lines) {
-            $cues[] = [1.0 + 2 * $i, 2.0 + 2 * $i, $lines];
+            $cues[] = [1.0 + 6 * $i, 5.0 + 6 * $i, $lines];
         }
         return $cues;
     }

@@ -29,9 +29,13 @@ class SrtTranslationValidatorTest extends TestCase
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
         $this->assertTrue($result['valid'], 'Valid translation should pass validation');
-        $this->assertEmpty($result['defects'], 'Valid translation should have no defects');
+        // Reading-speed warnings are expected on real broadcast CC flashes;
+        // nothing error-severe may remain.
+        $this->assertEmpty(
+            array_filter($result['defects'], fn ($d) => $d['severity'] === 'error'),
+            'Valid translation should have no error-severity defects'
+        );
         $this->assertSame(0, $result['error_count']);
-        $this->assertSame(0, $result['warning_count']);
 
         foreach ($result['quality']['ratios'] as $name => $ratio) {
             if ($name === 'verbatim_copy' || $name === 'near_verbatim_copy') {
@@ -39,6 +43,12 @@ class SrtTranslationValidatorTest extends TestCase
                 // (or near-identical) across languages; only a near-total
                 // copy may fail.
                 $this->assertLessThan(0.2, $ratio, "Ratio {$name} of a real translation must stay small");
+                continue;
+            }
+            if ($name === 'reading_speed') {
+                // Broadcast CC flashes legitimately exceed the profile cps
+                // limit; only the 5x error tier may fail (and does not here).
+                $this->assertLessThanOrEqual(5.0, $ratio, 'Reading speed of a real translation stays under the error tier');
                 continue;
             }
             $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");
@@ -154,7 +164,7 @@ class SrtTranslationValidatorTest extends TestCase
 
             $this->assertTrue($result['valid'], 'Harmless re-segmentation must stay usable');
             $this->assertSame(0, $result['error_count']);
-            $this->assertSame(2, $result['warning_count']);
+            $this->assertGreaterThanOrEqual(2, $result['warning_count']);
 
             $merges = array_filter($result['defects'], fn ($d) => $d['type'] === 'merged_captions');
             $this->assertCount(2, $merges);
@@ -176,7 +186,10 @@ class SrtTranslationValidatorTest extends TestCase
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
         $this->assertTrue($result['valid'], 'Valid translation should still be valid with strict tolerance');
-        $this->assertEmpty($result['defects'], 'No false positives even with strict tolerance');
+        $this->assertEmpty(
+            array_filter($result['defects'], fn ($d) => $d['type'] !== 'reading_speed'),
+            'No false positives even with strict tolerance'
+        );
     }
 
     public function testPartialTranslationDefect()

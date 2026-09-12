@@ -1,5 +1,6 @@
 # Local example fixtures
 /examples/*.srt
+/examples/*
 /docs/
 
 # Local pointer to the real-subtitle corpus (copyright, outside the repo)

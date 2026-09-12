@@ -13,6 +13,7 @@ timeline and reports these defect types:
 | `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (same-language passthrough) |
 | `edited_copy`         | error    | Nearly all captions are identical or >=90% similar to the source, yet not exactly identical - the model returned the original with light cosmetic edits. A different failure mode than `untranslated_copy` |
 | `unexpected_script`   | error    | Translation letters in a script foreign to the target language (character hallucination, e.g. Cyrillic in Hungarian); letters already spelled that way in the source are exempt |
+| `reading_speed`       | warning/error | A translation caption whose text needs more than the target language's cps limit to read within its display time: warning up to 5x the limit, error beyond it. Captions whose aligned source cue already exceeds its own limit are exempt - a translation cannot fix the source's timing |
 | `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
 | `split_captions`      | warning  | One source caption split across multiple translation captions           |
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
@@ -37,7 +38,8 @@ then judges the translation by how much is actually wrong:
 | `merged`             | source captions merged into neighbouring captions (content captions only) | 10%, adaptive up to 40% for dense targets (see below) |
 | `verbatim_copy`      | aligned captions identical to the source             | 50% (advisory during a same-language passthrough) |
 | `near_verbatim_copy` | aligned captions identical or >= 90% similar to the source (lightly edited passthrough) | 50% (advisory during a same-language passthrough) |
-| `unexpected_script`  | translation letters in a foreign script (not counting letters inherited from the source) | 0% (zero tolerance) |
+| `unexpected_script`  | translation letters in a script foreign to the target language, not counting letters inherited from the source | 1% (small allowance for scientific notation such as Greek letters) |
+| `reading_speed`      | worst caption's reading speed as a multiple of the target language's cps profile limit; only captions that are worse than their aligned source cue count (source-inherited overload is exempt) | 5x the limit |
 | `unaligned`          | source captions with no aligned translation pair     | advisory (no limit) |
 
 - A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
@@ -157,7 +159,7 @@ compares them, and prints a human-readable report.
 | `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions. Default: derived from the language pair (see "Adaptive merge tolerance"), 0.10 for same-density pairs. |
 | `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
 | `--max-near-verbatim-ratio=F` | Max share of aligned captions that may be identical or >=90% similar to the source; catches copies with light cosmetic edits as `edited_copy` (default: `0.50`). |
-| `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0`, zero tolerance). |
+| `--max-script-ratio=F` | Max share of translation letters in a script foreign to the target language, not counting letters inherited from the source (default: `0.01`, a small allowance for legitimate scientific notation such as Greek letters). |
 | `--max-errors=N`       | Fail when more than N error-severity defects are found, regardless of the ratios (default: no limit). |
 | `--readability`        | Readability audit of a single subtitle file: runs a per-caption check against readability limits and lists every caption that exceeds them. Purely advisory - no verdict, no defects, exit code is 0 when every caption is clean and 1 when problems are found. Takes exactly one file. |
 | `--max-cps=F`          | Max characters per second for the `--readability` audit. Default comes from the language profile (20.0 for the default profile). |

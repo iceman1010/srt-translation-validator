@@ -38,8 +38,20 @@ final class SrtTranslationValidator
     private const MAX_MERGE_DENSITY_FACTOR = 4.0;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
     private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;
-    /** Zero tolerance by default: any foreign-script letter is suspicious. */
-    private const DEFAULT_MAX_SCRIPT_RATIO = 0.0;
+    /**
+     * Small foreign-script allowance: stray scientific notation (Bayer
+     * designations like "Tau Ceti" -> Greek letters), math or physics
+     * symbols legitimately survive translation. A real wrong-language
+     * translation scores orders of magnitude higher, so 1% still catches it.
+     */
+    private const DEFAULT_MAX_SCRIPT_RATIO = 0.01;
+
+    /**
+     * Reading-speed error factor: a caption only fails the file when its
+     * text needs this multiple of the profile cps limit. Below it, over-
+     * limit captions are warnings - squeezed or dense, but still readable.
+     */
+    private const READING_SPEED_ERROR_FACTOR = 5.0;
 
     /** Minimum cue duration (seconds) a caption needs to count for CPS. */
     private const MIN_CPS_DURATION = 0.2;
@@ -329,6 +341,20 @@ final class SrtTranslationValidator
             ];
         }
 
+        // Aligned source cue per translation cue (match/drift/split events),
+        // used to exempt reading-speed problems inherited from the source.
+        $alignedSource = [];
+        foreach ($events as $event) {
+            if (isset($event['translation_index'], $event['source_index'])) {
+                $alignedSource[$event['translation_index']] = $event['source_index'];
+            }
+        }
+
+        $readingSpeed = $this->readingSpeedDefects($translationBlocks, $expectedLanguage, $originalBlocks, $alignedSource);
+        foreach ($readingSpeed['defects'] as $defect) {
+            $defects[] = $defect;
+        }
+
         return $this->buildResult($defects, [
             'source_captions' => $stats['source_captions'],
             'aligned_pairs' => $stats['aligned_pairs'],
@@ -345,6 +371,7 @@ final class SrtTranslationValidator
                 'verbatim_copy' => $stats['verbatim_ratio'],
                 'near_verbatim_copy' => $stats['near_verbatim_ratio'],
                 'unexpected_script' => $scriptRatio,
+                'reading_speed' => $readingSpeed['peak'],
                 'unaligned' => $stats['source_captions'] > 0
                     ? round(1 - $stats['aligned_pairs'] / $stats['source_captions'], 4)
                     : 0.0,
@@ -359,10 +386,11 @@ final class SrtTranslationValidator
                 'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
                 'near_verbatim_copy' => $passthrough ? null : $this->maxNearVerbatimRatio,
                 'unexpected_script' => $this->maxScriptRatio,
+                'reading_speed' => self::READING_SPEED_ERROR_FACTOR,
                 'unaligned' => null,
             ],
-            // Reading-speed and line-length statistics: informational only,
-            // they never produce defects or influence the verdict.
+            // Line-length statistics stay informational; reading speed is
+            // gated per caption by readingSpeedDefects() above.
             'readability' => $this->readabilityStats($translationBlocks),
             'max_errors' => $this->maxErrors,
             'strict' => $this->strict,
@@ -855,6 +883,111 @@ final class SrtTranslationValidator
         }
 
         return ['defects' => $defects, 'wrong_chars' => $wrongChars, 'analyzed_chars' => $analyzedChars];
+    }
+
+    /**
+     * Per-caption reading-speed gate over the translation cues. A caption
+     * whose text needs more than the language profile's cps limit to read
+     * is a warning; beyond READING_SPEED_ERROR_FACTOR times the limit the
+     * text cannot realistically be read within its display time and the
+     * defect is an error that fails the file (via the reading_speed ratio).
+     *
+     * Inheritance exemption: when a cue's aligned source caption already
+     * exceeds its own language's cps limit, the reading load predates the
+     * translation - a translator cannot fix the source's timing - so the
+     * cue is not flagged at all and never counts into the peak. Only
+     * captions the translation made worse than their source count.
+     *
+     * Uses the same counting rules as readabilityStats(): characters of
+     * the caption text joined by spaces, cues shorter than
+     * MIN_CPS_DURATION skipped. An unreadable profiles file disables the
+     * gate (the readability audit reports that loudly already).
+     *
+     * @param list<array{start: float, end: float, lines: list<string>}> $blocks
+     * @param list<array{start: float, end: float, lines: list<string>}> $sourceBlocks
+     * @param array<int, int> $alignedSource translation index -> source index
+     * @return array{defects: list<array<string, mixed>>, peak: float}
+     *         peak = worst non-exempt caption's cps as a multiple of the
+     *         limit (1.0 = exactly at the limit; 0.0 when nothing measurable)
+     */
+    private function readingSpeedDefects(array $blocks, string $language, array $sourceBlocks, array $alignedSource): array
+    {
+        try {
+            $limit = ReadabilityProfile::for($language)['cps'];
+            $sourceLanguage = $this->sourceLanguage ?? $this->detectDominantLanguage($sourceBlocks);
+            $sourceLimit = ReadabilityProfile::for($sourceLanguage)['cps'];
+        } catch (\Throwable $e) {
+            return ['defects' => [], 'peak' => 0.0];
+        }
+
+        $defects = [];
+        $peak = 0.0;
+
+        foreach ($blocks as $index => $block) {
+            $chars = mb_strlen(implode(' ', $block['lines']));
+            $duration = $block['end'] - $block['start'];
+            if ($chars === 0 || $duration < self::MIN_CPS_DURATION) {
+                continue;
+            }
+
+            $cps = $chars / $duration;
+            if ($cps <= $limit) {
+                continue;
+            }
+
+            if ($this->sourceIsOverloaded($sourceBlocks, $alignedSource, $index, $sourceLimit)) {
+                continue;
+            }
+
+            $factor = $cps / $limit;
+            if ($factor > $peak) {
+                $peak = $factor;
+            }
+
+            $error = $factor > self::READING_SPEED_ERROR_FACTOR;
+            $defects[] = [
+                'type' => 'reading_speed',
+                'severity' => $error ? 'error' : 'warning',
+                'message' => sprintf(
+                    'Caption #%d needs %.1f cps to read within its %.1fs display time, %s the %.1f cps limit of the %s profile',
+                    $index + 1,
+                    $cps,
+                    $duration,
+                    $error ? 'far above' : 'above',
+                    $limit,
+                    $language !== '' ? $language : 'default'
+                ),
+                'caption_number' => $index + 1,
+                'cps' => round($cps, 1),
+                'cps_limit' => $limit,
+                'duration' => round($duration, 3),
+            ];
+        }
+
+        return ['defects' => $defects, 'peak' => round($peak, 4)];
+    }
+
+    /**
+     * Whether the source caption aligned to the given translation index
+     * already exceeds the source language's cps limit: the reading load
+     * is inherited from the source, not introduced by the translation.
+     * Cues without an aligned source caption are never exempt.
+     *
+     * @param list<array{start: float, end: float, lines: list<string>}> $sourceBlocks
+     * @param array<int, int> $alignedSource
+     */
+    private function sourceIsOverloaded(array $sourceBlocks, array $alignedSource, int $index, float $sourceLimit): bool
+    {
+        $sourceIndex = $alignedSource[$index] ?? null;
+        if ($sourceIndex === null || !isset($sourceBlocks[$sourceIndex])) {
+            return false;
+        }
+
+        $source = $sourceBlocks[$sourceIndex];
+        $chars = mb_strlen(implode(' ', $source['lines']));
+        $duration = $source['end'] - $source['start'];
+
+        return $chars > 0 && $duration >= self::MIN_CPS_DURATION && $chars / $duration > $sourceLimit;
     }
 
     /**

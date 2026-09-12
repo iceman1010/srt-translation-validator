@@ -28,6 +28,7 @@ class CliTest extends TestCase
         $this->fixtures['scriptmix'] = $this->tmp . '/scriptmix.srt';
         $this->fixtures['cleanread'] = $this->tmp . '/clean-read.srt';
         $this->fixtures['threeline'] = $this->tmp . '/three-line.srt';
+        $this->fixtures['fastread'] = $this->tmp . '/fastread.srt';
 
         $english = 'The quick brown fox jumps over the lazy dog near the river bank.';
         $german = 'Der schnelle braune Fuchs sprang über den faulen Hund am Flussufer.';
@@ -35,8 +36,8 @@ class CliTest extends TestCase
         $enLines = [];
         $deLines = [];
         for ($i = 1; $i <= 20; $i++) {
-            $start = 2 * ($i - 1);
-            $end = ($i * 2) - 1;
+            $start = 5 * ($i - 1);
+            $end = ($i * 5) - 1;
             $enLines[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($end)) . "\n" . $english . ' ' . $i . "\n";
             $deLines[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($end)) . "\n" . $german . ' ' . $i . "\n";
         }
@@ -49,18 +50,27 @@ class CliTest extends TestCase
         // not onto another cue's start time.
         $driftedLines = $deLines;
         $driftedLines[9] = 10 . "\n"
-            . sprintf('%s --> %s', $this->tc(18.8), $this->tc(19.8)) . "\n"
+            . sprintf('%s --> %s', $this->tc(45.8), $this->tc(49.8)) . "\n"
             . $german . ' 10' . "\n";
 
         // German translation with a hallucinated Cyrillic run in cue 10.
         $scriptMixLines = $deLines;
         $scriptMixLines[9] = 10 . "\n"
-            . sprintf('%s --> %s', $this->tc(18), $this->tc(19)) . "\n"
+            . sprintf('%s --> %s', $this->tc(45), $this->tc(49)) . "\n"
             . $german . ' Привет мир' . "\n";
         file_put_contents($this->fixtures['scriptmix'], implode("\n", $scriptMixLines));
 
         file_put_contents($this->fixtures['original'], implode("\n", $enLines));
         file_put_contents($this->fixtures['translated'], implode("\n", $deLines));
+
+        // Readability-audit fixture: one-second cues with ~62-char lines, so
+        // every caption exceeds both the 20 cps and 42 cpl default limits.
+        $fastLines = [];
+        for ($i = 1; $i <= 20; $i++) {
+            $start = 2 * ($i - 1);
+            $fastLines[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($start + 1)) . "\n" . $german . ' ' . $i . "\n";
+        }
+        file_put_contents($this->fixtures['fastread'], implode("\n", $fastLines));
         file_put_contents($this->fixtures['missing'], implode("\n", array_slice($deLines, 0, 1)));
         file_put_contents($this->fixtures['malformed'], "1\n00:00:01,000 --> 00:00:03,000\nHallo Welt\n\nBROKEN_LINE_WITHOUT_TIMESTAMP\nMehr Text\n\n");
         file_put_contents($this->fixtures['merged'], implode("\n", $mergedLines));
@@ -326,7 +336,7 @@ class CliTest extends TestCase
         $this->assertStringContainsString('does not exist or is not readable', $data['error']);
     }
 
-    public function testScriptMixFailsWithZeroTolerance(): void
+    public function testScriptMixFailsWithDefaultTolerance(): void
     {
         [$exit, $output] = $this->execute([$this->fixtures['original'], $this->fixtures['scriptmix'], '-l', 'de', '--json']);
         $this->assertSame(1, $exit, $output);
@@ -335,8 +345,7 @@ class CliTest extends TestCase
         $this->assertFalse($data['valid']);
         $this->assertArrayHasKey('unexpected_script', $data['defects_by_type']);
         $this->assertGreaterThan(0, $data['quality']['ratios']['unexpected_script']);
-        // JSON round-trips 0.0 as int 0.
-        $this->assertEquals(0, $data['quality']['thresholds']['unexpected_script']);
+        $this->assertEquals(0.01, $data['quality']['thresholds']['unexpected_script']);
     }
 
     public function testScriptRatioOptionRelaxesVerdict(): void
@@ -381,7 +390,7 @@ class CliTest extends TestCase
     {
         // The translated fixture is 20 one-second captions of ~68 chars:
         // every one exceeds 20 cps and 42 chars/line.
-        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
 
         $data = json_decode($output, true);
@@ -415,14 +424,14 @@ class CliTest extends TestCase
 
     public function testReadabilityRequiresExactlyOneFile(): void
     {
-        [$exit, $output] = $this->execute(['--readability', $this->fixtures['original'], $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['original'], $this->fixtures['fastread']]);
         $this->assertSame(2, $exit);
         $this->assertStringContainsString('--readability expects exactly one subtitle file, got 2', $output);
     }
 
     public function testReadabilityHumanReport(): void
     {
-        [$exit, $output] = $this->execute(['--readability', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
         $this->assertStringContainsString('Readability Audit', $output);
         $this->assertStringContainsString('Problematic captions (20)', $output);
@@ -455,7 +464,7 @@ class CliTest extends TestCase
 
     public function testReadabilityLimitTruncatesJson(): void
     {
-        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '3', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '3', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
 
         $data = json_decode($output, true);
@@ -469,7 +478,7 @@ class CliTest extends TestCase
 
     public function testReadabilityLimitAboveTotalIsNotTruncated(): void
     {
-        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '100', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', '--json', '--limit', '100', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
 
         $data = json_decode($output, true);
@@ -480,16 +489,16 @@ class CliTest extends TestCase
 
     public function testReadabilityInvalidLimitIsUsageError(): void
     {
-        [$exitZero] = $this->execute(['--readability', '--limit', '0', $this->fixtures['translated']]);
+        [$exitZero] = $this->execute(['--readability', '--limit', '0', $this->fixtures['fastread']]);
         $this->assertSame(2, $exitZero);
 
-        [$exitLetters] = $this->execute(['--readability', '--limit', 'abc', $this->fixtures['translated']]);
+        [$exitLetters] = $this->execute(['--readability', '--limit', 'abc', $this->fixtures['fastread']]);
         $this->assertSame(2, $exitLetters);
     }
 
     public function testReadabilityWorstFirstOrdersByReadingSpeed(): void
     {
-        [$exit, $output] = $this->execute(['--readability', '--json', '--worst-first', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', '--json', '--worst-first', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
 
         $data = json_decode($output, true);
@@ -506,7 +515,7 @@ class CliTest extends TestCase
 
     public function testReadabilityHumanReportCarriesSeverity(): void
     {
-        [$exit, $output] = $this->execute(['--readability', $this->fixtures['translated']]);
+        [$exit, $output] = $this->execute(['--readability', $this->fixtures['fastread']]);
         $this->assertSame(1, $exit, $output);
         $this->assertStringContainsString('[critical]', $output);
         $this->assertStringContainsString('critical - reading speed', $output);
