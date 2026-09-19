@@ -357,6 +357,9 @@ final class SrtTranslationValidator
 
         return $this->buildResult($defects, [
             'source_captions' => $stats['source_captions'],
+            // Denominator for per-caption defects (e.g. reading_speed):
+            // without it, a defect count alone is impossible to interpret.
+            'translation_captions' => count($translationBlocks),
             'aligned_pairs' => $stats['aligned_pairs'],
             'partial_chars_analyzed' => $partial['analyzed_chars'],
             'ratios' => [
@@ -448,7 +451,7 @@ final class SrtTranslationValidator
     {
         $sample = '';
         foreach ($blocks as $block) {
-            $text = trim(implode(' ', $block['lines']));
+            $text = trim(ReadabilityChecker::plainText(implode(' ', $block['lines'])));
             if (mb_strlen($text) < 3 || preg_match('/^\[.*\]$/', $text) || preg_match('/♪|♫/', $text)) {
                 continue;
             }
@@ -924,7 +927,7 @@ final class SrtTranslationValidator
         $peak = 0.0;
 
         foreach ($blocks as $index => $block) {
-            $chars = mb_strlen(implode(' ', $block['lines']));
+            $chars = ReadabilityChecker::plainLength(implode(' ', $block['lines']));
             $duration = $block['end'] - $block['start'];
             if ($chars === 0 || $duration < self::MIN_CPS_DURATION) {
                 continue;
@@ -984,7 +987,7 @@ final class SrtTranslationValidator
         }
 
         $source = $sourceBlocks[$sourceIndex];
-        $chars = mb_strlen(implode(' ', $source['lines']));
+        $chars = ReadabilityChecker::plainLength(implode(' ', $source['lines']));
         $duration = $source['end'] - $source['start'];
 
         return $chars > 0 && $duration >= self::MIN_CPS_DURATION && $chars / $duration > $sourceLimit;
@@ -1009,14 +1012,14 @@ final class SrtTranslationValidator
 
         foreach ($blocks as $index => $block) {
             foreach ($block['lines'] as $line) {
-                $length = mb_strlen($line);
+                $length = ReadabilityChecker::plainLength($line);
                 if ($length > $maxCpl) {
                     $maxCpl = $length;
                     $maxCplCaption = $index + 1;
                 }
             }
 
-            $chars = mb_strlen(implode(' ', $block['lines']));
+            $chars = ReadabilityChecker::plainLength(implode(' ', $block['lines']));
             $duration = $block['end'] - $block['start'];
             if ($chars === 0 || $duration < self::MIN_CPS_DURATION) {
                 continue;

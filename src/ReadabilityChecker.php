@@ -133,14 +133,14 @@ final class ReadabilityChecker
             $caption = $index + 1;
             $lines = array_map('strval', $block['lines']);
             $text = implode(' ', $lines);
-            $chars = mb_strlen($text);
+            $chars = self::plainLength($text);
             $start = (float)($block['start'] ?? 0);
             $end = (float)($block['end'] ?? 0);
             $duration = $end - $start;
 
             $maxLine = 0;
             foreach ($lines as $line) {
-                $maxLine = max($maxLine, mb_strlen($line));
+                $maxLine = max($maxLine, self::plainLength($line));
             }
             if ($maxLine > $maxObservedCpl) {
                 $maxObservedCpl = $maxLine;
@@ -239,6 +239,29 @@ final class ReadabilityChecker
     private static function severity(int|float $value, int|float $limit): string
     {
         return $value > 2 * $limit ? 'critical' : 'minor';
+    }
+
+    /**
+     * Visible text of a caption: markup tags are not text a viewer reads,
+     * so strip_tags() removes them, and html_entity_decode() collapses
+     * entities ("&amp;") to the single character the viewer sees. Stripping
+     * runs before decoding so escaped markup ("&lt;i&gt;") that renders
+     * literally still counts as text.
+     *
+     * Subtitle libraries differ here (mantas-done/subtitles v0.3.10 keeps
+     * tags in parsed lines, v1.x strips them at parse time) - measuring the
+     * parsed lines directly would give different numbers per version, so
+     * every count goes through this normalization instead.
+     */
+    public static function plainText(string $text): string
+    {
+        return html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    }
+
+    /** Readable character count of plainText(). */
+    public static function plainLength(string $text): int
+    {
+        return mb_strlen(self::plainText($text));
     }
 
     /** @return list<array{start: float, end: float, lines: list<string>}> */

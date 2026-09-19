@@ -2,6 +2,7 @@
 /examples/*.srt
 /examples/*
 /docs/
+/tools/
 
 # Local pointer to the real-subtitle corpus (copyright, outside the repo)
 /tests/.corpus_dir

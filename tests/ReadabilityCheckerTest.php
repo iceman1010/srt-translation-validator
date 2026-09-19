@@ -14,6 +14,47 @@ class ReadabilityCheckerTest extends TestCase
         return ['start' => $start, 'end' => $end, 'lines' => $lines];
     }
 
+    public function testMarkupIsExcludedFromCountsIdenticallyForBothLibraryVariants(): void
+    {
+        // mantas-done/subtitles v0.3.x keeps <i> tags in parsed lines, v1.x
+        // strips them at parse time. Both variants must yield identical
+        // counts: 40 visible chars over 1s = 40 cps, whether the tags are
+        // still in the lines or already gone.
+        $visible = str_repeat('a', 40);
+        $tagged = (new ReadabilityChecker())->analyze([$this->block(0, 1, ['<i>' . $visible . '</i>'])]);
+        $clean = (new ReadabilityChecker())->analyze([$this->block(0, 1, [$visible])]);
+
+        $this->assertSame(40, $tagged['problems'][0]['chars']);
+        $this->assertSame(40.0, $tagged['problems'][0]['cps']);
+        $this->assertSame($clean['problems'][0]['chars'], $tagged['problems'][0]['chars']);
+        $this->assertSame($clean['problems'][0]['cps'], $tagged['problems'][0]['cps']);
+    }
+
+    public function testEntitiesCountAsTheirVisibleCharacters(): void
+    {
+        // "Tom &amp; Jerry" is 11 visible characters, not 15: over 0.5s the
+        // visible text reads at 22 cps (minor), the raw text at 30 cps
+        // (critical) - the entity must not inflate the severity.
+        $analysis = (new ReadabilityChecker())->analyze([
+            $this->block(0, 0.5, ['Tom &amp; Jerry']),
+        ]);
+
+        $problem = $analysis['problems'][0];
+        $this->assertSame(11, $problem['chars']);
+        $this->assertSame(22.0, $problem['cps']);
+        $this->assertSame('minor', $problem['severity']);
+    }
+
+    public function testPlainTextHelpers(): void
+    {
+        $this->assertSame('Hello', ReadabilityChecker::plainText('<i>Hello</i>'));
+        $this->assertSame(5, ReadabilityChecker::plainLength('<i>Hello</i>'));
+        $this->assertSame('Tom & Jerry', ReadabilityChecker::plainText('Tom &amp; Jerry'));
+        // Escaped markup renders literally, so the viewer reads it: kept.
+        $this->assertSame(8, ReadabilityChecker::plainLength('&lt;i&gt;hello'));
+        $this->assertSame(0, ReadabilityChecker::plainLength(''));
+    }
+
     public function testCleanCaptionsReportNoProblems(): void
     {
         $analysis = (new ReadabilityChecker())->analyze([

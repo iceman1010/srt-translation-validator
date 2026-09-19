@@ -36,6 +36,9 @@ class SrtTranslationValidatorTest extends TestCase
             'Valid translation should have no error-severity defects'
         );
         $this->assertSame(0, $result['error_count']);
+        // Denominator for per-caption defects (e.g. reading_speed) must be
+        // reported so stored findings are interpretable on their own.
+        $this->assertArrayHasKey('translation_captions', $result['quality']);
 
         foreach ($result['quality']['ratios'] as $name => $ratio) {
             if ($name === 'verbatim_copy' || $name === 'near_verbatim_copy') {
@@ -268,7 +271,7 @@ class SrtTranslationValidatorTest extends TestCase
                 );
 
                 $this->assertTrue($result['valid'], "A malformed source ({$garbage}) must never fail the translation");
-                $this->assertSame(0, $result['error_count']);
+        $this->assertSame(0, $result['error_count']);
                 $this->assertSame(1, $result['warning_count']);
                 $this->assertSame('source_parse_failed', $result['defects'][0]['type']);
                 $this->assertSame('warning', $result['defects'][0]['severity']);
