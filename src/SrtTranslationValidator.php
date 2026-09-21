@@ -53,6 +53,14 @@ final class SrtTranslationValidator
      */
     private const READING_SPEED_ERROR_FACTOR = 5.0;
 
+    /**
+     * A cue is exempt from reading-speed flagging when its aligned source
+     * cue already runs at this fraction of the source language's cps limit:
+     * pacing that close to the limit leaves the translator no headroom, so
+     * even a faithful rendering will exceed the (much lower) target limit.
+     */
+    private const SOURCE_OVERLOAD_FACTOR = 0.8;
+
     /** Minimum cue duration (seconds) a caption needs to count for CPS. */
     private const MIN_CPS_DURATION = 0.2;
 
@@ -896,10 +904,11 @@ final class SrtTranslationValidator
      * defect is an error that fails the file (via the reading_speed ratio).
      *
      * Inheritance exemption: when a cue's aligned source caption already
-     * exceeds its own language's cps limit, the reading load predates the
-     * translation - a translator cannot fix the source's timing - so the
-     * cue is not flagged at all and never counts into the peak. Only
-     * captions the translation made worse than their source count.
+     * runs at SOURCE_OVERLOAD_FACTOR (80%) or more of its own language's
+     * cps limit, the reading load predates the translation - a translator
+     * cannot fix the source's timing - so the cue is not flagged at all
+     * and never counts into the peak. Only captions the translation made
+     * worse than their source count.
      *
      * Uses the same counting rules as readabilityStats(): characters of
      * the caption text joined by spaces, cues shorter than
@@ -972,9 +981,10 @@ final class SrtTranslationValidator
 
     /**
      * Whether the source caption aligned to the given translation index
-     * already exceeds the source language's cps limit: the reading load
-     * is inherited from the source, not introduced by the translation.
-     * Cues without an aligned source caption are never exempt.
+     * already runs at SOURCE_OVERLOAD_FACTOR (80%) or more of the source
+     * language's cps limit: the reading load is inherited from the source,
+     * not introduced by the translation. Cues without an aligned source
+     * caption are never exempt.
      *
      * @param list<array{start: float, end: float, lines: list<string>}> $sourceBlocks
      * @param array<int, int> $alignedSource
@@ -990,7 +1000,9 @@ final class SrtTranslationValidator
         $chars = ReadabilityChecker::plainLength(implode(' ', $source['lines']));
         $duration = $source['end'] - $source['start'];
 
-        return $chars > 0 && $duration >= self::MIN_CPS_DURATION && $chars / $duration > $sourceLimit;
+        return $chars > 0
+            && $duration >= self::MIN_CPS_DURATION
+            && $chars / $duration >= self::SOURCE_OVERLOAD_FACTOR * $sourceLimit;
     }
 
     /**

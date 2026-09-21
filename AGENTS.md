@@ -34,6 +34,19 @@
   the repo's `/docs/` rule), with a README documenting each step so it can be
   re-run.
 
+### Production Error Investigations (tools/)
+
+- `tools/check_recent_errors.php` reads production translation errors
+  (MariaDB via the ai1-db-tunnel, MongoDB over VPN). Setup, prerequisites
+  and usage: `tools/README.md`.
+- Model-behavior knowledge (segmentation quirks, language-pair findings,
+  case log) lives in `docs/knowledge/` — start at `docs/knowledge/index.md`.
+  **Consult it before investigating translation errors, and record new
+  durable findings there** (evidence = error id + date, never full subtitle
+  text — dumps are copyrighted, local only).
+- **ALWAYS ask for the user's approval before implementing any change** —
+  present the plan first, wait for an explicit yes.
+
 ### Release Flow
 - Pushing to `main` runs the tests. The PHAR is built and the GitHub Release
   `v<VERSION>` created/updated **only when the `VERSION` file changed**

@@ -354,6 +354,52 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertSame(0.0, $result['quality']['ratios']['reading_speed']);
     }
 
+    public function testNearOverloadedSourceIsExempt(): void
+    {
+        // The source cue runs at 17 of 20 cps (85%, >= the 80% overload
+        // threshold): the translator has no headroom, so the unreadable
+        // translation must not be blamed for the source's pacing.
+        $original = $this->write('original-near', [
+            [1.0, 2.0, ['Okay, sure thing.']],
+            [4.0, 8.0, ['Everybody gets back to their seat.']],
+            [9.0, 13.0, ['This is the last line of the recording.']],
+        ]);
+        $translation = $this->write('near-inherited', [
+            [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [4.0, 8.0, ['Rövid mondat.']],
+            [9.0, 13.0, ['Még egy rövid mondat.']],
+        ]);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame([], $result['defects']);
+    }
+
+    public function testSourceBelowNearOverloadThresholdStillFlags(): void
+    {
+        // The source cue runs at 15 of 20 cps (75%, below the 80% overload
+        // threshold): there was headroom, so the unreadable translation is
+        // flagged as before.
+        $original = $this->write('original-headroom', [
+            [1.0, 2.0, ['Okay, I suppose']],
+            [4.0, 8.0, ['Everybody gets back to their seat.']],
+            [9.0, 13.0, ['This is the last line of the recording.']],
+        ]);
+        $translation = $this->write('headroom-flagged', [
+            [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [4.0, 8.0, ['Rövid mondat.']],
+            [9.0, 13.0, ['Még egy rövid mondat.']],
+        ]);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertFalse($result['valid']);
+        $this->assertSame(1, $result['error_count']);
+        $this->assertSame('reading_speed', $result['defects'][0]['type']);
+    }
+
     /**
      * @param list<array{0: float, 1: float, 2: list<string>}> $cues [start, end, lines]
      */
