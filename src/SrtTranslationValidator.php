@@ -31,11 +31,6 @@ final class SrtTranslationValidator
 
     private const DEFAULT_MAX_LOSS_RATIO = 0.01;
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
-    private const DEFAULT_MAX_MERGE_RATIO = 0.10;
-    /** Upper bound of the adaptive merge tolerance for dense target languages. */
-    private const MAX_ADAPTIVE_MERGE_RATIO = 0.40;
-    /** Upper bound of the cpl density factor between source and target. */
-    private const MAX_MERGE_DENSITY_FACTOR = 4.0;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
     private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;
     /**
@@ -52,6 +47,28 @@ final class SrtTranslationValidator
      * limit captions are warnings - squeezed or dense, but still readable.
      */
     private const READING_SPEED_ERROR_FACTOR = 5.0;
+
+    /**
+     * Pacing verdict, share-based (a single bad caption must not fail a
+     * 900-caption file). The file fails only when the density problem is
+     * either substantial (this share of captions is error-tier, i.e. needs
+     * more than READING_SPEED_ERROR_FACTOR times the limit) or widespread
+     * (PACING_OVER_LIMIT_SHARE of all captions exceed the limit at all).
+     * Smaller shares stay per-caption warnings.
+     */
+    private const PACING_ERROR_SHARE = 0.02;
+    /** Minimum error-tier caption count for the share gate (tiny files). */
+    private const PACING_ERROR_MIN_COUNT = 3;
+    /** Share of captions over the limit (warning or error tier) that means widespread density. */
+    private const PACING_OVER_LIMIT_SHARE = 0.5;
+
+    /**
+     * When at least this share of SOURCE cues carry non-dialogue pollution
+     * (markup blobs, annotation markers), the pacing verdict downgrades to
+     * advisory: the reading load may be inherited from the source, so it
+     * cannot decide the translation's fate.
+     */
+    private const SOURCE_POLLUTION_SHARE = 0.01;
 
     /**
      * A cue is exempt from reading-speed flagging when its aligned source
@@ -92,6 +109,24 @@ final class SrtTranslationValidator
     /** null = no error-count gate (ratio thresholds decide alone). */
     private ?int $maxErrors = null;
     private bool $strict = false;
+
+    /** Result of the most recent validate() call, for the probe methods. */
+    private ?array $lastResult = null;
+
+    /**
+     * Which ratio gates can make a given defect type the reason a file
+     * failed. A defect type absent here (or mapping to gates that did not
+     * fire) is advisory: it can never be the reason `valid` is false.
+     */
+    private const DEFECT_TYPE_GATES = [
+        'invalid_format' => ['invalid_format'],
+        'untranslated_copy' => ['verbatim_copy', 'near_verbatim_copy'],
+        'edited_copy' => ['verbatim_copy', 'near_verbatim_copy'],
+        'missing_caption' => ['content_loss'],
+        'timestamp_mismatch' => ['timestamp_drift'],
+        'reading_speed' => ['pacing_error_share', 'pacing_over_limit_share'],
+        'unexpected_script' => ['unexpected_script'],
+    ];
 
     /**
      * Declared language of the source file (base code), when known from the
@@ -317,10 +352,13 @@ final class SrtTranslationValidator
             ? round($script['foreign_chars'] / $script['letters'], 4)
             : 0.0;
 
-        // Merge tolerance: explicit override wins, otherwise it scales with
-        // the language pair's information density (see adaptiveMergeThreshold).
-        $mergeThreshold = $this->mergeRatioOverride
-            ?? $this->adaptiveMergeThreshold($originalBlocks, $expectedLanguage);
+        // Merge tolerance: merging is re-segmentation style, not a quality
+        // fault - a low-cpl source (ja, 13 cpl) merging into a high-cpl
+        // target (en, 42 cpl) is expected model behavior (production error
+        // #6). Whether content actually disappeared is measured directly by
+        // the content_loss ratio, so the merged ratio is advisory unless
+        // the operator explicitly re-activates the gate.
+        $mergeThreshold = $this->mergeRatioOverride;
 
         if ($script !== null && $scriptRatio > $this->maxScriptRatio) {
             $scriptSummary = implode(', ', array_map(
@@ -363,6 +401,21 @@ final class SrtTranslationValidator
             $defects[] = $defect;
         }
 
+        // Pacing verdict, share-based: a single bad caption must not fail a
+        // 900-caption file, and a polluted source demotes pacing to advisory
+        // (the reading load may be inherited, so it cannot decide the
+        // translation's fate).
+        $pollutionShare = $this->sourcePollutionShare($originalBlocks);
+        $pacingAdvisory = $pollutionShare >= self::SOURCE_POLLUTION_SHARE;
+        $errorTier = 0;
+        $overLimit = count($readingSpeed['defects']);
+        foreach ($readingSpeed['defects'] as $defect) {
+            if ($defect['severity'] === 'error') {
+                $errorTier++;
+            }
+        }
+        $captionCount = max(1, count($translationBlocks));
+
         return $this->buildResult($defects, [
             'source_captions' => $stats['source_captions'],
             // Denominator for per-caption defects (e.g. reading_speed):
@@ -382,7 +435,13 @@ final class SrtTranslationValidator
                 'verbatim_copy' => $stats['verbatim_ratio'],
                 'near_verbatim_copy' => $stats['near_verbatim_ratio'],
                 'unexpected_script' => $scriptRatio,
+                // Advisory: the peak factor is reported for inspection, but
+                // the verdict uses the share gates below (or nothing at all
+                // when the source is polluted).
                 'reading_speed' => $readingSpeed['peak'],
+                'pacing_error_share' => round($errorTier / $captionCount, 4),
+                'pacing_over_limit_share' => round($overLimit / $captionCount, 4),
+                'source_pollution_share' => round($pollutionShare, 4),
                 'unaligned' => $stats['source_captions'] > 0
                     ? round(1 - $stats['aligned_pairs'] / $stats['source_captions'], 4)
                     : 0.0,
@@ -397,11 +456,19 @@ final class SrtTranslationValidator
                 'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
                 'near_verbatim_copy' => $passthrough ? null : $this->maxNearVerbatimRatio,
                 'unexpected_script' => $this->maxScriptRatio,
-                'reading_speed' => self::READING_SPEED_ERROR_FACTOR,
+                'reading_speed' => null,
+                // Share gates: substantial and/or widespread density fails;
+                // isolated over-limit captions stay warnings. A polluted
+                // source demotes pacing to advisory (null thresholds).
+                'pacing_error_share' => $pacingAdvisory
+                    ? null
+                    : max(self::PACING_ERROR_SHARE, self::PACING_ERROR_MIN_COUNT / (float) $captionCount),
+                'pacing_over_limit_share' => $pacingAdvisory ? null : self::PACING_OVER_LIMIT_SHARE,
+                'source_pollution_share' => null,
                 'unaligned' => null,
             ],
-            // Line-length statistics stay informational; reading speed is
-            // gated per caption by readingSpeedDefects() above.
+            // Line-length statistics stay informational; pacing is gated by
+            // the share ratios above.
             'readability' => $this->readabilityStats($translationBlocks),
             'max_errors' => $this->maxErrors,
             'strict' => $this->strict,
@@ -409,43 +476,58 @@ final class SrtTranslationValidator
     }
 
     /**
-     * Merge-ratio threshold for this job when no explicit override was set:
-     * scaled from the language pair's information density. When the target
-     * language renders the same content in fewer characters (en -> ja: 42
-     * vs 13 chars/line in resources/readability-profiles.json), merged cues
-     * are expected re-segmentation, not sloppiness, so the 10% base
-     * tolerance grows with the density ratio - bounded, so the gate can
-     * never be disabled:
+     * Whether the last validate() call failed BECAUSE of this defect type:
+     * the verdict is false and a gate attributable to the type actually
+     * fired (quality.failed_gates). Error-severity defects alone are not
+     * enough - several files carry error-tier defects yet stay valid under
+     * the share gates. Unknown defect types probe by their own name.
      *
-     *   factor    = clamp(source_cpl / target_cpl, 1, 4)
-     *   threshold = min(10% x factor, 40%)
-     *
-     * Same-density pairs and verbose targets keep 10% (the calibrated
-     * corpus behaviour); unknown languages or a failing profile lookup
-     * fall back to the base constant. The source language comes from the
-     * declaration (setSourceLanguage) or, as a best effort, from detection
-     * over the source captions - detection result is used only here and
-     * never feeds the same-language passthrough decision.
-     *
-     * @param list<array{start: float, end: float, lines: list<string>}> $sourceBlocks
+     * @throws \LogicException when validate() has not run yet
      */
-    private function adaptiveMergeThreshold(array $sourceBlocks, string $targetLanguage): float
+    public function isFailing(string $defectType): bool
     {
-        $sourceLanguage = $this->sourceLanguage ?? $this->detectDominantLanguage($sourceBlocks);
-        if ($sourceLanguage === null || $sourceLanguage === ScriptChecker::baseLanguage($targetLanguage)) {
-            return self::DEFAULT_MAX_MERGE_RATIO;
+        $result = $this->lastResult
+            ?? throw new \LogicException('isFailing() requires a prior validate() call');
+
+        if ($result['valid']) {
+            return false;
         }
 
-        try {
-            $sourceCpl = ReadabilityProfile::for($sourceLanguage)['cpl'];
-            $targetCpl = ReadabilityProfile::for($targetLanguage)['cpl'];
-        } catch (\Throwable $e) {
-            return self::DEFAULT_MAX_MERGE_RATIO;
+        $gates = self::DEFECT_TYPE_GATES[$defectType] ?? [$defectType];
+        if (array_intersect($gates, $result['quality']['failed_gates'] ?? []) !== []) {
+            return true;
         }
 
-        $factor = min(max($sourceCpl / $targetCpl, 1.0), self::MAX_MERGE_DENSITY_FACTOR);
+        // Strict mode and the max_errors gate fail on error-severity
+        // defects directly: this type is a cause when it has any.
+        if (($result['quality']['strict'] ?? false) || isset($result['quality']['max_errors'])) {
+            return $this->hasDefect($defectType, 'error');
+        }
 
-        return min(self::DEFAULT_MAX_MERGE_RATIO * $factor, self::MAX_ADAPTIVE_MERGE_RATIO);
+        return false;
+    }
+
+    /**
+     * Whether the last validate() call produced at least one defect of this
+     * type, optionally restricted to a severity ('error'/'warning').
+     * Presence is independent of the verdict: advisory defects count too.
+     *
+     * @throws \LogicException when validate() has not run yet
+     */
+    public function hasDefect(string $defectType, ?string $severity = null): bool
+    {
+        $result = $this->lastResult
+            ?? throw new \LogicException('hasDefect() requires a prior validate() call');
+
+        foreach ($result['defects'] as $defect) {
+            if (($defect['type'] ?? '') !== $defectType) {
+                continue;
+            }
+            if ($severity === null || ($defect['severity'] ?? null) === $severity) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -507,32 +589,54 @@ final class SrtTranslationValidator
         }
 
         $reasons = [];
+        $failedGates = [];
         if ($quality !== null) {
-            $reasons = $this->verdictReasons($quality['ratios'], $quality['thresholds'], $errorCount);
+            [$reasons, $failedGates] = $this->verdictReasons($quality['ratios'], $quality['thresholds'], $errorCount);
             $quality['reasons'] = $reasons;
+            $quality['failed_gates'] = $failedGates;
         } elseif ($errorCount > 0) {
+            // Unreadable/invalid file: the format gate is the failure.
             $reasons = ['subtitle format is invalid'];
+            $failedGates = ['invalid_format'];
         }
 
-        return [
+        $result = [
             'valid' => $reasons === [],
             'defects' => $defects,
             'error_count' => $errorCount,
             'warning_count' => $warningCount,
-            'quality' => $quality ?? ['reasons' => $errorCount > 0 ? ['subtitle format is invalid'] : []],
+            'quality' => $quality ?? [
+                'reasons' => $reasons,
+                'failed_gates' => $failedGates,
+            ],
         ];
+
+        $this->lastResult = $result;
+        return $result;
     }
 
     /** @return list<string> */
+    /**
+     * Human-readable verdict reasons plus, in parallel, the machine-readable
+     * list of ratio gates that fired (quality.failed_gates) - the probes
+     * isFailing()/hasDefect() work on that list instead of parsing strings.
+     *
+     * Under strict mode or a max_errors breach the failing "gates" are the
+     * error-severity defect types themselves, since those are what caused
+     * the failure.
+     *
+     * @return array{0: list<string>, 1: list<string>} [reasons, failed_gates]
+     */
     private function verdictReasons(array $ratios, array $thresholds, int $errorCount): array
     {
         if ($this->strict) {
             return $errorCount > 0
-                ? ["strict mode: {$errorCount} error-severity defect(s)"]
-                : [];
+                ? [["strict mode: {$errorCount} error-severity defect(s)"], []]
+                : [[], []];
         }
 
         $reasons = [];
+        $failedGates = [];
         if ($this->maxErrors !== null && $errorCount > $this->maxErrors) {
             $reasons[] = sprintf(
                 '%d error-severity defects exceed the limit of %d',
@@ -551,8 +655,9 @@ final class SrtTranslationValidator
                 $value * 100,
                 $threshold * 100
             );
+            $failedGates[] = $name;
         }
-        return $reasons;
+        return [$reasons, $failedGates];
     }
 
     private function formatDefects(array $formatResult): array
@@ -734,7 +839,7 @@ final class SrtTranslationValidator
                         $originalText = implode(' ', $originalBlocks[$i]['lines']);
                         $defects[] = [
                             'type' => 'missing_caption',
-                            'severity' => 'error',
+                            'severity' => 'warning',
                             'message' => 'Caption #' . ($i + 1) . ' is missing in translation',
                             'caption_number' => $i + 1,
                             'original_text' => substr($originalText, 0, self::TEXT_PREVIEW_LENGTH)
@@ -901,7 +1006,10 @@ final class SrtTranslationValidator
      * whose text needs more than the language profile's cps limit to read
      * is a warning; beyond READING_SPEED_ERROR_FACTOR times the limit the
      * text cannot realistically be read within its display time and the
-     * defect is an error that fails the file (via the reading_speed ratio).
+     * defect is error-severity. The VERDICT never rides on a single
+     * caption: it uses the share gates in validate() (pacing_error_share /
+     * pacing_over_limit_share), because one isolated bad cue must not fail
+     * a 900-caption file.
      *
      * Inheritance exemption: when a cue's aligned source caption already
      * runs at SOURCE_OVERLOAD_FACTOR (80%) or more of its own language's
@@ -1003,6 +1111,36 @@ final class SrtTranslationValidator
         return $chars > 0
             && $duration >= self::MIN_CPS_DURATION
             && $chars / $duration >= self::SOURCE_OVERLOAD_FACTOR * $sourceLimit;
+    }
+
+    /**
+     * Share of source cues carrying annotation pollution: a leading "*"
+     * marker or a "???" sequence - the fansub convention observed in
+     * production (error #2, 2026-09-19: editorial annotations and embedded
+     * research notes in the source). Only plain-text markers qualify:
+     * markup tags are stripped at parse time by newer subtitle libraries,
+     * so they would make this check behave differently per installed
+     * variant. Above SOURCE_POLLUTION_SHARE this demotes the pacing
+     * verdict to advisory.
+     *
+     * @param list<array{lines: list<string>}> $sourceBlocks
+     */
+    private function sourcePollutionShare(array $sourceBlocks): float
+    {
+        $count = count($sourceBlocks);
+        if ($count === 0) {
+            return 0.0;
+        }
+
+        $polluted = 0;
+        foreach ($sourceBlocks as $block) {
+            $text = implode(' ', $block['lines']);
+            if (preg_match('/(^|\s)\*/u', $text) || str_contains($text, '???')) {
+                $polluted++;
+            }
+        }
+
+        return $polluted / $count;
     }
 
     /**

@@ -46,6 +46,9 @@
   text — dumps are copyrighted, local only).
 - **ALWAYS ask for the user's approval before implementing any change** —
   present the plan first, wait for an explicit yes.
+- **When reporting errors, ALWAYS name the engine and the language pair
+  together** — "en→ro, DeepL: …", never one without the other. A failure
+  report without the responsible model is useless.
 
 ### Release Flow
 - Pushing to `main` runs the tests. The PHAR is built and the GitHub Release

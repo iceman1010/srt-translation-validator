@@ -334,10 +334,11 @@ class ValidatorGatesTest extends TestCase
         ], $messages);
     }
 
-    public function testDenseTargetLanguageGetsAdaptiveMergeTolerance(): void
+    public function testMergesAreAdvisoryForDenseTargets(): void
     {
-        // 25% merged: over the 10% base tolerance, under the en->ja
-        // adaptive tolerance (10% x 42/13 cpl = ~32%).
+        // 25% merged into a dense target (en -> ja): merging is
+        // re-segmentation style, never a fault on its own - reported as a
+        // ratio, but the verdict gate stays off unless explicitly set.
         [$source, $translation] = $this->mergeFixture(
             fn (int $i): string => '日本語のセリフ' . ($i + 1),
             'translation.ja.srt'
@@ -348,12 +349,13 @@ class ValidatorGatesTest extends TestCase
 
         $this->assertTrue($result['valid']);
         $this->assertSame(0.25, $result['quality']['ratios']['merged']);
-        $this->assertEqualsWithDelta(0.3231, $result['quality']['thresholds']['merged'], 0.001);
+        $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
-    public function testAdaptiveToleranceUsesDetectedSourceLanguage(): void
+    public function testMergesAreAdvisoryWithoutDeclaredSourceLanguage(): void
     {
-        // No --source-lang: the source language is detected from the file.
+        // No --source-lang: detection is irrelevant to the merge verdict -
+        // merging is advisory for every language pair.
         [$source, $translation] = $this->mergeFixture(
             fn (int $i): string => '日本語のセリフ' . ($i + 1),
             'translation.ja.srt'
@@ -362,11 +364,13 @@ class ValidatorGatesTest extends TestCase
         $result = $this->validator->validate($source, $translation, 'ja');
 
         $this->assertTrue($result['valid']);
+        $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
-    public function testSameDensityPairsKeepBaseMergeTolerance(): void
+    public function testMergesAreAdvisoryForSameDensityPairs(): void
     {
-        // en -> de: both default profile (42 cpl), factor 1, threshold 10%.
+        // en -> de: both default profile (42 cpl). 25% merged stays
+        // advisory - real content loss is the content_loss gate's job.
         [$source, $translation] = $this->mergeFixture(
             fn (int $i): string => 'Deutsche Dialogzeile Nummer ' . ($i + 1) . ' mit einigen Wörtern',
             'translation.de.srt'
@@ -375,14 +379,17 @@ class ValidatorGatesTest extends TestCase
 
         $result = $this->validator->validate($source, $translation, 'de');
 
-        $this->assertFalse($result['valid']);
-        $this->assertContains('merged 25.00% exceeds the threshold 10.00%', $result['quality']['reasons']);
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0.25, $result['quality']['ratios']['merged']);
+        $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
-    public function testVerboseTargetKeepsBaseMergeTolerance(): void
+    public function testVerboseTargetMergingIsAdvisory(): void
     {
-        // ja -> en: the factor clamps at 1 (verbose targets merge less, not more).
-        // Japanese source, English translation missing the same cues.
+        // ja -> en, production error #6 pattern (2026-09-21): short Japanese
+        // fragments legitimately merge into full English lines (~13% on real
+        // jobs). 25% merged must stay advisory - the translation did nothing
+        // wrong, and real loss is measured by content_loss.
         $jaSource = $this->writeSrt('source.ja.srt', array_map(
             fn (int $i): array => [$i * 2, $i * 2 + 2, '日本語のセリフ' . ($i + 1)],
             range(0, 11)
@@ -396,11 +403,12 @@ class ValidatorGatesTest extends TestCase
 
         $result = $this->validator->validate($jaSource, $enTranslation, 'en');
 
-        $this->assertFalse($result['valid']);
-        $this->assertContains('merged 25.00% exceeds the threshold 10.00%', $result['quality']['reasons']);
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0.25, $result['quality']['ratios']['merged']);
+        $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
-    public function testExplicitMergeRatioOverridesAdaptiveTolerance(): void
+    public function testExplicitMergeRatioReactivatesTheGate(): void
     {
         [$source, $translation] = $this->mergeFixture(
             fn (int $i): string => '日本語のセリフ' . ($i + 1),

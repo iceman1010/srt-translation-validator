@@ -308,7 +308,10 @@ class CliTest extends TestCase
         $this->assertSame('failed', $data['result']);
         $this->assertGreaterThan(0, $data['defect_count']);
         $this->assertSame(count($data['defects']), $data['defect_count']);
-        $this->assertGreaterThan(0, $data['error_count']);
+        // Missing captions are pairing-derived warnings now: the file fails
+        // via the content_loss ratio, with zero error-severity defects.
+        $this->assertSame(0, $data['error_count']);
+        $this->assertGreaterThan(0, $data['warning_count']);
 
         $counted = [];
         $errors = 0;

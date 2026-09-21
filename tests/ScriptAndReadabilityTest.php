@@ -286,7 +286,12 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertSame(40.0, $defect['cps']);
         $this->assertSame(20.0, $defect['cps_limit']);
         $this->assertSame(2.0, $result['quality']['ratios']['reading_speed']);
-        $this->assertSame(5.0, $result['quality']['thresholds']['reading_speed']);
+        // The peak factor is advisory now: the verdict uses the share
+        // gates, so the reading_speed threshold is null. Pacing shares are
+        // active; the minimum-count floor for a 3-caption file is 3/3.
+        $this->assertNull($result['quality']['thresholds']['reading_speed']);
+        $this->assertSame(0.0, $result['quality']['ratios']['pacing_error_share']);
+        $this->assertSame(1.0, $result['quality']['thresholds']['pacing_error_share']);
 
         $readability = $result['quality']['readability'];
         $this->assertSame(40.0, $readability['max_cps']);
@@ -299,9 +304,10 @@ class ScriptAndReadabilityTest extends TestCase
 
     public function testUnreadableCaptionFailsValidation(): void
     {
-        // 111 chars (60 + space + 50) over 1s = 111 cps: far beyond the 5x
-        // default limit (100), the caption cannot be read in its display
-        // time. The source cue stays under its own limit (exemption off).
+        // All three translation cues need 111 cps (60 + space + 50 over 1s):
+        // far beyond the 5x default limit (100), and with 100% of captions
+        // unreadable the share gate fails the file. The source cues stay
+        // under their own limit (exemption off).
         $original = $this->write('original-u', [
             [1.0, 2.0, ['Okay.']],
             [4.0, 8.0, ['Everybody gets back to their seat.']],
@@ -309,15 +315,15 @@ class ScriptAndReadabilityTest extends TestCase
         ]);
         $translation = $this->write('unreadable', [
             [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
-            [4.0, 8.0, ['Rövid mondat.']],
-            [9.0, 13.0, ['Még egy rövid mondat.']],
+            [4.0, 8.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [9.0, 13.0, [str_repeat('é', 60), str_repeat('a', 50)]],
         ]);
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
         $this->assertFalse($result['valid']);
         $this->assertStringContainsString(
-            'reading speed',
+            'pacing over limit share',
             implode(' ', $result['quality']['reasons'])
         );
 
@@ -379,9 +385,10 @@ class ScriptAndReadabilityTest extends TestCase
 
     public function testSourceBelowNearOverloadThresholdStillFlags(): void
     {
-        // The source cue runs at 15 of 20 cps (75%, below the 80% overload
-        // threshold): there was headroom, so the unreadable translation is
-        // flagged as before.
+        // The source cues run at or below 15 of 20 cps (75%, below the 80%
+        // overload threshold): there was headroom, so the unreadable
+        // translations are flagged - and with 100% of captions unreadable
+        // the share gate fails the file.
         $original = $this->write('original-headroom', [
             [1.0, 2.0, ['Okay, I suppose']],
             [4.0, 8.0, ['Everybody gets back to their seat.']],
@@ -389,15 +396,127 @@ class ScriptAndReadabilityTest extends TestCase
         ]);
         $translation = $this->write('headroom-flagged', [
             [1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]],
-            [4.0, 8.0, ['Rövid mondat.']],
-            [9.0, 13.0, ['Még egy rövid mondat.']],
+            [4.0, 8.0, [str_repeat('é', 60), str_repeat('a', 50)]],
+            [9.0, 13.0, [str_repeat('é', 60), str_repeat('a', 50)]],
         ]);
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
+        // Cue 1 is error-tier (111 cps over 1s); cues 2-3 are warning-tier
+        // (27.8 cps over 4s) - but ALL captions are over the limit, so the
+        // widespread-density share gate (>= 50%) fails the file.
         $this->assertFalse($result['valid']);
         $this->assertSame(1, $result['error_count']);
         $this->assertSame('reading_speed', $result['defects'][0]['type']);
+    }
+
+    public function testIsolatedUnreadableCaptionStaysBelowTheVerdict(): void
+    {
+        // One 111-cps caption out of twenty (5% of a small file, but below
+        // the 3-caption floor) is a flagged error-severity defect, yet it
+        // must not fail the whole file: the pacing verdict is share-based.
+        $sourceCues = [[1.0, 2.0, ['Okay.']]];
+        $translationCues = [[1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]]];
+        for ($i = 2; $i <= 20; $i++) {
+            $start = 3.0 + $i * 4.0;
+            $sourceCues[] = [$start, $start + 4.0, ['Everybody gets back to their seat.']];
+            $translationCues[] = [$start, $start + 4.0, ['Rövid mondat a székhez.']];
+        }
+
+        $original = $this->write('original-blip', $sourceCues);
+        $translation = $this->write('blip', $translationCues);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertTrue($result['valid'], 'A single unreadable caption must not fail the file');
+        $this->assertSame(1, $result['error_count'], 'The caption itself is still flagged error-tier');
+    }
+
+    public function testPollutedSourceDemotesPacingToAdvisory(): void
+    {
+        // One in twenty source cues carries a fansub annotation (leading
+        // "*" marker, production error #2 pattern): above the 1% pollution
+        // share the pacing verdict becomes advisory, so even a fully
+        // over-limit translation cannot fail on pacing alone.
+        $sourceCues = [[1.0, 3.0, ['*Megjegyzes: ez egy hosszabb szerkesztoi beiras a fansub Kiadasbol']]];
+        $translationCues = [[1.0, 3.0, [str_repeat('é', 40)]]];
+        for ($i = 2; $i <= 20; $i++) {
+            $start = 4.0 + $i * 4.0;
+            $sourceCues[] = [$start, $start + 3.0, ['Egy kozonseges, olvashato mondat.']];
+            $translationCues[] = [$start, $start + 3.0, [str_repeat('a', 80)]];
+        }
+
+        $original = $this->write('original-polluted', $sourceCues);
+        $translation = $this->write('polluted-translation', $translationCues);
+
+        $result = $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertTrue($result['valid'], 'A polluted source demotes pacing to advisory');
+        $this->assertNull($result['quality']['thresholds']['pacing_over_limit_share']);
+        $this->assertGreaterThanOrEqual(0.01, $result['quality']['ratios']['source_pollution_share']);
+        $this->assertGreaterThan(0, $result['warning_count'], 'The over-limit captions are still reported');
+    }
+
+    public function testIsFailingReflectsTheVerdictCauseNotMerePresence(): void
+    {
+        // A verbatim copy fails BECAUSE of untranslated_copy; pacing and
+        // merging never fired, so their probes must stay false even though
+        // the pipeline reports the file.
+        $original = $this->write('probe-original', [
+            [1.0, 3.0, ['Hola, bienvenidos al programa de hoy.']],
+            [4.0, 6.0, ['Muchas gracias por estar aqui.']],
+        ]);
+        $translation = $this->write('probe-copy', [
+            [1.0, 3.0, ['Hola, bienvenidos al programa de hoy.']],
+            [4.0, 6.0, ['Muchas gracias por estar aqui.']],
+        ]);
+
+        $this->validator->validate($original, $translation, 'fr');
+
+        $this->assertTrue($this->validator->isFailing('untranslated_copy'));
+        $this->assertFalse($this->validator->isFailing('reading_speed'));
+        $this->assertFalse($this->validator->isFailing('invalid_format'));
+        $this->assertTrue($this->validator->hasDefect('untranslated_copy', 'error'));
+    }
+
+    public function testIsFailingIsFalseWhenTheVerdictIsValid(): void
+    {
+        // One isolated unreadable caption (below the share gates): the
+        // defect exists with error severity, but nothing failed.
+        $sourceCues = [[1.0, 2.0, ['Okay.']]];
+        $translationCues = [[1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]]];
+        for ($i = 2; $i <= 20; $i++) {
+            $start = 3.0 + $i * 4.0;
+            $sourceCues[] = [$start, $start + 4.0, ['Everybody gets back to their seat.']];
+            $translationCues[] = [$start, $start + 4.0, ['Rövid mondat a székhez.']];
+        }
+        $this->validator->validate(
+            $this->write('probe-blip-src', $sourceCues),
+            $this->write('probe-blip-tgt', $translationCues),
+            'hu'
+        );
+
+        $this->assertTrue($this->validator->hasDefect('reading_speed', 'error'));
+        $this->assertFalse($this->validator->isFailing('reading_speed'));
+    }
+
+    public function testIsFailingDetectsInvalidFormat(): void
+    {
+        $translation = $this->tmp . '/probe-broken.srt';
+        $this->fixtures[] = $translation;
+        file_put_contents($translation, "1\n00:00:01,000 --> text without timing\njust text\n");
+        $original = $this->write('probe-fmt-src', [[1.0, 3.0, ['Okay.']]]);
+
+        $this->validator->validate($original, $translation, 'hu');
+
+        $this->assertFalse($this->validator->isFailing('untranslated_copy'));
+        $this->assertTrue($this->validator->isFailing('invalid_format'));
+    }
+
+    public function testProbesRequireAPriorValidateCall(): void
+    {
+        $this->expectException(\LogicException::class);
+        $this->validator->isFailing('untranslated_copy');
     }
 
     /**

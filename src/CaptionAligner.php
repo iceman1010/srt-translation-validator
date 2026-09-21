@@ -30,6 +30,16 @@ namespace SrtValidator;
  *  - unmatched source runs become gaps (merged-away or lost content; the
  *    aligner reports the geometry, the validator decides the policy).
  *
+ * Known limitation (2026-09, see docs/knowledge/): re-segmenters that keep
+ * the cue times but re-distribute the text across neighboring slots (DeepL)
+ * produce off-by-one pairings inside Pass A's exact-time "matches" - the
+ * timeline alone cannot see them. Per-cue defects that rest on a pairing
+ * are therefore not reliable enough to decide the verdict on their own;
+ * that policy lives in the validator's gates, not here. A global (DP)
+ * realignment was prototyped and rejected: its cost model cannot
+ * distinguish text re-distribution from a genuine uniform time shift, so
+ * it traded one class of false flags for another.
+ *
  * Events returned (1-based indices are NOT used; callers add +1 for display):
  *  match      source_index, translation_index, start_diff, end_diff
  *  drift      source_index, translation_index, start_diff, end_diff

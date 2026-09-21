@@ -54,6 +54,12 @@ class SrtTranslationValidatorTest extends TestCase
                 $this->assertLessThanOrEqual(5.0, $ratio, 'Reading speed of a real translation stays under the error tier');
                 continue;
             }
+            if ($name === 'pacing_over_limit_share' || $name === 'source_pollution_share') {
+                // Same broadcast CC flashes: a few over-limit captions are
+                // normal, far below the 50% widespread-density gate.
+                $this->assertLessThan(0.5, $ratio, 'Pacing shares of a real translation stay far below the gates');
+                continue;
+            }
             $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");
         }
     }
@@ -72,7 +78,11 @@ class SrtTranslationValidatorTest extends TestCase
         });
 
         $this->assertCount(25, $missing);
-        $this->assertSame(25, $result['error_count']);
+        // Pairing-derived defects are advisory: a missing caption may be an
+        // aligner artifact, so it can never fail the verdict on its own -
+        // this file fails via the content_loss ratio instead.
+        $this->assertSame('warning', reset($missing)['severity']);
+        $this->assertSame(0, $result['error_count']);
         // The loss ratio is measured over CONTENT captions only (music cues
         // and annotations are excluded from the denominator).
         $this->assertEqualsWithDelta(0.0149, $result['quality']['ratios']['content_loss'], 0.0005);
@@ -141,7 +151,8 @@ class SrtTranslationValidatorTest extends TestCase
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
         $this->assertTrue($result['valid'], '1.36% loss is tolerable with a 2% threshold');
-        $this->assertSame(25, $result['error_count'], 'The defects are still reported');
+        $this->assertSame(0, $result['error_count'], 'Missing captions are warnings, never errors');
+        $this->assertGreaterThanOrEqual(25, $result['warning_count'], 'The defects are still reported');
     }
 
     public function testMergedCaptionsAreWarnings()
