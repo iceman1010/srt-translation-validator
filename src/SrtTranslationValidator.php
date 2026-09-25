@@ -29,7 +29,14 @@ final class SrtTranslationValidator
      */
     private const MAX_MERGE_SPAN = 3;
 
-    private const DEFAULT_MAX_LOSS_RATIO = 0.01;
+    /**
+     * Content-loss gate. The distribution in production is bimodal: DeepL
+     * merge/pairing artifacts sit at 0.4-1.3% (errors #3, #9, #10), real
+     * truncation (pipeline crash, API cutoff) at 10%+. The threshold sits
+     * in the empty middle - it must catch wholesale loss, not count merge
+     * noise. The per-caption missing_caption warnings stay fully visible.
+     */
+    private const DEFAULT_MAX_LOSS_RATIO = 0.05;
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
     private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;

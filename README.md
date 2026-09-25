@@ -7,7 +7,7 @@ timeline and reports these defect types:
 | Defect                | Severity | What it detects                                                          |
 | --------------------- | -------- | ------------------------------------------------------------------------ |
 | `invalid_format`      | error    | Malformed SRT/WebVTT structure (bad or missing timestamp lines, garbage, NUL bytes) |
-| `missing_caption`     | error    | Source captions with no translation counterpart at all (real content loss; music/annotation-only cues are excluded) |
+| `missing_caption`     | warning  | Source captions with no translation counterpart (pairing-derived: merge artifacts look identical to real loss, so this is advisory; music/annotation-only cues are excluded) |
 | `partial_translation` | warning  | Large caption blocks detected in the wrong language. **Advisory only** - the detector label is decoration and never fails the verdict |
 | `timestamp_mismatch`  | error    | Aligned captions whose start/end times drifted beyond a tolerance       |
 | `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (same-language passthrough) |
@@ -32,7 +32,7 @@ then judges the translation by how much is actually wrong:
 
 | Ratio                | Measures                                             | Default limit |
 | -------------------- | ---------------------------------------------------- | ------------- |
-| `content_loss`       | source captions with no translation counterpart (content captions only - music/annotation cues excluded) | 1%            |
+| `content_loss`       | source captions with no translation counterpart (content captions only - music/annotation cues excluded) | 5% (production loss is bimodal: merge noise at 0.4-1.3%, real truncation at 10%+) |
 | `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
 | `partial_translation`| translation characters detected in the wrong language (base-code comparison: `es-mx` target matches `es` detection) | advisory (no limit) |
 | `merged`             | source captions merged into neighbouring captions (content captions only) | advisory (no limit) — re-segmentation style, not a fault; real loss is measured by `content_loss`. `--max-merge-ratio` re-activates the gate |
@@ -244,10 +244,10 @@ reported as `{"error": "..."}` with exit code `2`.
             "unaligned": 0.0052
         },
         "thresholds": {
-            "content_loss": 0.01,
+            "content_loss": 0.05,
             "timestamp_drift": 0.02,
             "partial_translation": null,
-            "merged": 0.1,
+            "merged": null,
             "verbatim_copy": 0.5,
             "near_verbatim_copy": 0.5,
             "unexpected_script": 0.0,

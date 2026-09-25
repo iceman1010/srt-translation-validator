@@ -71,7 +71,10 @@ class SrtTranslationValidatorTest extends TestCase
 
         $result = $this->validator->validate($originalPath, $translationPath, 'de');
 
-        $this->assertFalse($result['valid'], '25 missing captions (1.49% of content captions) should fail validation');
+        // 25 missing captions = 1.49% loss: below the 5% gate, this is
+        // merge/pairing-scale noise, so the file passes - the defects stay
+        // fully visible as warnings.
+        $this->assertTrue($result['valid'], '1.49% loss is merge noise, not truncation');
 
         $missing = array_filter($result['defects'], function ($defect) {
             return $defect['type'] === 'missing_caption';
@@ -79,8 +82,7 @@ class SrtTranslationValidatorTest extends TestCase
 
         $this->assertCount(25, $missing);
         // Pairing-derived defects are advisory: a missing caption may be an
-        // aligner artifact, so it can never fail the verdict on its own -
-        // this file fails via the content_loss ratio instead.
+        // aligner artifact, so it can never fail the verdict on its own.
         $this->assertSame('warning', reset($missing)['severity']);
         $this->assertSame(0, $result['error_count']);
         // The loss ratio is measured over CONTENT captions only (music cues
