@@ -408,6 +408,61 @@ class ValidatorGatesTest extends TestCase
         $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
+    public function testMixedLanguageSourceExcludesLegitimateCopies(): void
+    {
+        // Production error #20 pattern: the "English" source contains a
+        // large block already written in the target language. A correct
+        // translation leaves that block unchanged - those pairs are exempt
+        // (the copy corpus detects nl and real translation work exists in
+        // the English cues), so the file must NOT fail as a passthrough.
+        $cues = [];
+        $translation = [];
+        for ($i = 0; $i < 40; $i++) {
+            $start = $i * 6.0;
+            $cues[] = [$start, $start + 5.5, "English dialogue line number $i with several fairly common words in it"];
+            $translation[] = [$start, $start + 5.5, "Nederlandse dialoog regel nummer $i met verschillende veelvoorkomende woorden erin"];
+        }
+        for ($i = 40; $i < 100; $i++) {
+            $start = $i * 6.0;
+            $cues[] = [$start, $start + 5.5, "Dit is een nederlandse bronregel met nummer $i die al volledig in de doeltaal is geschreven"];
+            $translation[] = [$start, $start + 5.5, "Dit is een nederlandse bronregel met nummer $i die al volledig in de doeltaal is geschreven"];
+        }
+        $source = $this->writeSrt('mixed-source.srt', $cues);
+        $translationFile = $this->writeSrt('mixed-translation.srt', $translation);
+
+        $result = $this->validator->validate($source, $translationFile, 'nl');
+
+        $this->assertTrue($result['valid'], 'Legitimately unchanged target-language cues must not fail the file');
+        $this->assertNotEmpty(
+            array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'mixed_language_source'),
+            'The mixed-source correction must stay visible'
+        );
+    }
+
+    public function testSourceAlreadyInTargetLanguageStillFails(): void
+    {
+        // Production error #23 pattern: a Finnish file submitted into an
+        // en->fi job - the "translation" is a copy of a source that is
+        // already in the target language, with NO real translation work
+        // anywhere. The mixed-source exemption must not apply, and the
+        // language mismatch gets its own warning.
+        $cues = [];
+        for ($i = 0; $i < 60; $i++) {
+            $start = $i * 6.0;
+            $cues[] = [$start, $start + 5.5, "Tämä on suomenkielinen lause numero $i, jossa on riittävästi sanoja mittaamista varten."];
+        }
+        $source = $this->writeSrt('fi-source.srt', $cues);
+        $translation = $this->writeSrt('fi-translation.srt', $cues);
+
+        $result = $this->validator->validate($source, $translation, 'fi');
+
+        $this->assertFalse($result['valid'], 'A file that is already in the target language did no translation work');
+        $this->assertNotEmpty(
+            array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'source_already_in_target_language'),
+            'The language mismatch must be reported explicitly'
+        );
+    }
+
     public function testExplicitMergeRatioReactivatesTheGate(): void
     {
         [$source, $translation] = $this->mergeFixture(

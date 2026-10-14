@@ -17,6 +17,15 @@ final class SrtTranslationValidator
     private const MIN_CHUNK_CHARS = 5000;
     /** Minimum detection confidence to report a wrong-language chunk. */
     private const MIN_CONFIDENCE = 0.35;
+    /** Upper bound for the concatenated copy-corpus sample (plenty for one detection). */
+    private const COPY_CORPUS_MAX_CHARS = 50000;
+    /**
+     * The mixed-source copy exemption requires proof that the file also
+     * contains real translation work: at least this many non-copy pairs...
+     */
+    private const MIXED_SOURCE_MIN_TRANSLATED = 5;
+    /** ...and at least this share of compared pairs. */
+    private const MIXED_SOURCE_MIN_TRANSLATED_SHARE = 0.10;
 
     /** Maximum caption text length kept in missing-caption defects. */
     private const TEXT_PREVIEW_LENGTH = 100;
@@ -297,7 +306,7 @@ final class SrtTranslationValidator
 
         $aligner = new CaptionAligner();
         $events = $aligner->align($originalBlocks, $translationBlocks, $this->timestampTolerance);
-        [$alignmentDefects, $stats] = $this->alignmentDefects($events, $originalBlocks, $translationBlocks);
+        [$alignmentDefects, $stats] = $this->alignmentDefects($events, $originalBlocks, $translationBlocks, $expectedLanguage);
 
         $partial = $this->detectPartialTranslation($translationBlocks, $expectedLanguage);
 
@@ -313,6 +322,41 @@ final class SrtTranslationValidator
                 'severity' => 'warning',
                 'message' => 'Source file is already written in the target language; '
                     . 'verbatim/untranslated gates skipped (same-language passthrough)',
+            ];
+        }
+
+        // Mixed-language source: copy pairs whose text is predominantly the
+        // target language already were excluded from the verbatim gates
+        // (they are source cues legitimately passing through unchanged).
+        // Say so loudly instead of silently shifting the numbers.
+        if ($stats['copy_pairs_excluded'] > 0) {
+            $defects[] = [
+                'type' => 'mixed_language_source',
+                'severity' => 'warning',
+                'message' => sprintf(
+                    '%d aligned captions are verbatim/near-verbatim copies whose text is already predominantly in the target language (%s) - mixed-language source, excluded from the copy gates',
+                    $stats['copy_pairs_excluded'],
+                    $expectedLanguage
+                ),
+                'copy_pairs_excluded' => $stats['copy_pairs_excluded'],
+            ];
+        } elseif (!$passthrough
+            && !empty($stats['copy_corpus_target'])
+            && $stats['compared_pairs'] > 0
+            && $stats['copy_pairs'] / $stats['compared_pairs'] >= 0.5) {
+            // Error #23 class: the "translation" is a copy of a source that
+            // is itself already in the target language. The copy gate keeps
+            // failing it, but the real message is the language mismatch.
+            $defects[] = [
+                'type' => 'source_already_in_target_language',
+                'severity' => 'warning',
+                'message' => sprintf(
+                    '%d of %d aligned captions are copies, and their text detects as the target language (%s) - the source file may already be in the target language',
+                    $stats['copy_pairs'],
+                    $stats['compared_pairs'],
+                    $expectedLanguage
+                ),
+                'copy_pairs' => $stats['copy_pairs'],
             ];
         }
 
@@ -441,6 +485,11 @@ final class SrtTranslationValidator
                 'merged' => $stats['merge_ratio'],
                 'verbatim_copy' => $stats['verbatim_ratio'],
                 'near_verbatim_copy' => $stats['near_verbatim_ratio'],
+                // Advisory: share of copy pairs excluded as mixed-source
+                // (their corpus detects as the target language).
+                'target_language_copy_share' => $stats['copy_pairs'] > 0
+                    ? round($stats['copy_pairs_excluded'] / $stats['copy_pairs'], 4)
+                    : 0.0,
                 'unexpected_script' => $scriptRatio,
                 // Advisory: the peak factor is reported for inspection, but
                 // the verdict uses the share gates below (or nothing at all
@@ -462,6 +511,7 @@ final class SrtTranslationValidator
                 // expected output, so neither copy ratio gates anything.
                 'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
                 'near_verbatim_copy' => $passthrough ? null : $this->maxNearVerbatimRatio,
+                'target_language_copy_share' => null,
                 'unexpected_script' => $this->maxScriptRatio,
                 'reading_speed' => null,
                 // Share gates: substantial and/or widespread density fails;
@@ -728,9 +778,11 @@ final class SrtTranslationValidator
      * @param list<array<string, mixed>> $events
      * @param list<array{start: float, end: float, lines: list<string>}> $originalBlocks
      * @param list<array{start: float, end: float, lines: list<string>}> $translationBlocks
-     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int}}
+     * @param string $expectedLanguage target language, for the copy-corpus
+     *        mixed-source decision (see copyCorpusIsTargetLanguage())
+     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int, copy_pairs: int, copy_pairs_excluded: int}}
      */
-    private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks): array
+    private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks, string $expectedLanguage): array
     {
         $defects = [];
         $pairs = 0;
@@ -740,6 +792,9 @@ final class SrtTranslationValidator
         $identicalPairs = 0;
         $nearVerbatimPairs = 0;
         $comparedPairs = 0;
+        // Verbatim/near-verbatim pairs are collected as texts first: whether
+        // they count depends on the copy-corpus language decision below.
+        $copyPairs = [];
 
         // Normalized source text per caption, computed once: pairs whose
         // source normalizes to nothing (music cues "♪♪", "[music]", "...")
@@ -773,11 +828,11 @@ final class SrtTranslationValidator
                         $translationText = $this->normalizeForComparison(implode(' ', $translationBlocks[$j]['lines']));
                         $comparedPairs++;
                         if ($sourceText === $translationText) {
-                            $identicalPairs++;
+                            $copyPairs[] = ['kind' => 'identical', 'text' => $sourceText];
                         } else {
                             similar_text($sourceText, $translationText, $similarity);
                             if ($similarity >= self::NEAR_VERBATIM_SIMILARITY) {
-                                $nearVerbatimPairs++;
+                                $copyPairs[] = ['kind' => 'near', 'text' => $sourceText];
                             }
                         }
                     }
@@ -877,6 +932,34 @@ final class SrtTranslationValidator
             }
         }
 
+        // Mixed-source correction, decided ONCE over the whole copy corpus
+        // (all identical/near-verbatim texts concatenated - kilobytes, a
+        // reliable language-detection sample, unlike per-cue detection of
+        // short captions). Target-dominant copy text alone is not enough:
+        // the file must ALSO show real translation work elsewhere, otherwise
+        // it is a source that is already entirely in the target language
+        // (production error #23: a Finnish file submitted as en->fi), and
+        // the copy gate must keep failing it.
+        $excludedCopies = 0;
+        $corpusIsTarget = $copyPairs !== []
+            && $this->copyCorpusIsTargetLanguage($copyPairs, $expectedLanguage);
+        if ($corpusIsTarget) {
+            $workPairs = $comparedPairs - count($copyPairs);
+            if ($workPairs >= self::MIXED_SOURCE_MIN_TRANSLATED
+                && $workPairs >= self::MIXED_SOURCE_MIN_TRANSLATED_SHARE * $comparedPairs) {
+                $excludedCopies = count($copyPairs);
+            }
+        }
+        if (!$excludedCopies) {
+            foreach ($copyPairs as $copy) {
+                if ($copy['kind'] === 'identical') {
+                    $identicalPairs++;
+                } else {
+                    $nearVerbatimPairs++;
+                }
+            }
+        }
+
         $sourceCount = count($originalBlocks);
 
         return [$defects, [
@@ -895,6 +978,9 @@ final class SrtTranslationValidator
             'near_verbatim_ratio' => $comparedPairs > 0
                 ? round(($identicalPairs + $nearVerbatimPairs) / $comparedPairs, 4)
                 : 0.0,
+            'copy_pairs' => count($copyPairs),
+            'copy_pairs_excluded' => $excludedCopies,
+            'copy_corpus_target' => $corpusIsTarget,
         ]];
     }
 
@@ -1006,6 +1092,45 @@ final class SrtTranslationValidator
         }
 
         return ['defects' => $defects, 'wrong_chars' => $wrongChars, 'analyzed_chars' => $analyzedChars];
+    }
+
+    /**
+     * Whether the verbatim/near-verbatim copy pairs of a file are
+     * predominantly written in the TARGET language already. One detection
+     * over the concatenated copy text decides for the whole file:
+     * target-dominant copy text means a mixed-language source whose cues
+     * legitimately pass through translation unchanged; source-dominant copy
+     * text is a real untranslated passthrough. The corpus is kilobytes of
+     * text - a reliable sample, unlike per-cue detection of short captions.
+     *
+     * Conservative fallback: with too little copy text to judge (or a
+     * failed detection), the copies COUNT (gate behaves as before).
+     *
+     * @param list<array{kind: string, text: string}> $copyPairs
+     */
+    private function copyCorpusIsTargetLanguage(array $copyPairs, string $expectedLanguage): bool
+    {
+        $expectedLanguage = ScriptChecker::baseLanguage($expectedLanguage);
+
+        $corpus = '';
+        foreach ($copyPairs as $copy) {
+            $corpus .= ' ' . $copy['text'];
+            if (strlen($corpus) >= self::COPY_CORPUS_MAX_CHARS) {
+                break;
+            }
+        }
+        if (strlen($corpus) < self::MIN_CHUNK_CHARS) {
+            return false;
+        }
+
+        $detections = $this->languageDetector->detect($corpus)->close();
+        if (!$detections) {
+            return false;
+        }
+
+        $detectedLanguage = ScriptChecker::baseLanguage((string) array_key_first($detections));
+        return $detectedLanguage === $expectedLanguage
+            && (float) reset($detections) > self::MIN_CONFIDENCE;
     }
 
     /**
