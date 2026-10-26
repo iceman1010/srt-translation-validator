@@ -13,7 +13,7 @@ timeline and reports these defect types:
 | `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (same-language passthrough) |
 | `edited_copy`         | error    | Nearly all captions are identical or >=90% similar to the source, yet not exactly identical - the model returned the original with light cosmetic edits. A different failure mode than `untranslated_copy` |
 | `unexpected_script`   | error    | Translation letters in a script foreign to the target language (character hallucination, e.g. Cyrillic in Hungarian); letters already spelled that way in the source are exempt |
-| `reading_speed`       | warning/error | A translation caption whose text needs more than the target language's cps limit to read within its display time: warning up to 5x the limit, error beyond it. Captions whose aligned source cue already runs at >= 80% of its own limit are exempt - a translation cannot fix the source's timing. Pacing alone never fails a file: the verdict uses the `pacing_error_share` / `pacing_over_limit_share` gates (see Ratios) |
+| `reading_speed`       | warning  | A translation caption whose text needs more than the target language's cps limit to read within its display time (message reads "far above" beyond 5x the limit). Captions whose aligned source cue already runs at >= 80% of its own limit are exempt - a translation cannot fix the source's timing. Pacing is advisory by policy: the defects are always warnings and never fail a file, in any mode |
 | `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
 | `split_captions`      | warning  | One source caption split across multiple translation captions           |
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
@@ -39,10 +39,10 @@ then judges the translation by how much is actually wrong:
 | `verbatim_copy`      | aligned captions identical to the source             | 50% (advisory during a same-language passthrough) |
 | `near_verbatim_copy` | aligned captions identical or >= 90% similar to the source (lightly edited passthrough) | 50% (advisory during a same-language passthrough) |
 | `unexpected_script`  | translation letters in a script foreign to the target language, not counting letters inherited from the source | 1% (small allowance for scientific notation such as Greek letters) |
-| `reading_speed`      | worst caption's reading speed as a multiple of the target language's cps profile limit; only captions that are worse than their aligned source cue count (source-inherited overload is exempt) | advisory (no limit - see the pacing share gates) |
-| `pacing_error_share` | share of captions that are error-tier (needing more than 5x the limit) | 2%, with a floor of 3 captions for small files |
-| `pacing_over_limit_share` | share of captions that exceed the limit at all (widespread density) | 50% |
-| `source_pollution_share` | source cues carrying fansub annotations (leading `*` or `???` markers) | advisory; at >= 1% the pacing gates become advisory (the reading load may be inherited from the source) |
+| `reading_speed`      | worst caption's reading speed as a multiple of the target language's cps profile limit; only captions that are worse than their aligned source cue count (source-inherited overload is exempt) | advisory (no limit) |
+| `pacing_error_share` | share of captions that are error-tier (needing more than 5x the limit) | advisory - pacing never fails a file |
+| `pacing_over_limit_share` | share of captions that exceed the limit at all (widespread density) | advisory - pacing never fails a file |
+| `source_pollution_share` | source cues carrying fansub annotations (leading `*` or `???` markers) | advisory (informational: the reading load may be inherited from the source) |
 | `unaligned`          | source captions with no aligned translation pair     | advisory (no limit) |
 
 - A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
@@ -557,9 +557,9 @@ foreach ($result['defects'] as $i => $defect) {
             'near_verbatim_copy'  => 0.0065,
             'unexpected_script'   => 0.0,
             'reading_speed'       => 2.1,      // advisory peak factor, no threshold
-            'pacing_error_share'  => 0.002,    // verdict gate: >= 2% (3-caption floor) fails
-            'pacing_over_limit_share' => 0.04, // verdict gate: >= 50% fails
-            'source_pollution_share' => 0.0,   // advisory; >= 1% demotes pacing
+            'pacing_error_share'  => 0.002,    // advisory - pacing never fails a file
+            'pacing_over_limit_share' => 0.04, // advisory - pacing never fails a file
+            'source_pollution_share' => 0.0,   // advisory, informational
             'unaligned'           => 0.0142,   // advisory, no threshold
         ],
         'thresholds' => [
@@ -571,8 +571,8 @@ foreach ($result['defects'] as $i => $defect) {
             'near_verbatim_copy'  => 0.50,
             'unexpected_script'   => 0.0,
             'reading_speed'       => null,
-            'pacing_error_share'  => 0.02,
-            'pacing_over_limit_share' => 0.5,
+            'pacing_error_share'  => null,     // advisory by policy (2026-10-26)
+            'pacing_over_limit_share' => null, // advisory by policy (2026-10-26)
             'source_pollution_share' => null,
             'unaligned'           => null,
         ],
@@ -600,10 +600,9 @@ targeted questions:
 ```php
 $validator->validate($originalPath, $translationPath, 'de');
 
-// Did the file fail BECAUSE of this defect type? (verdict-deciding only:
-// an error-tier defect tolerated by the share gates does not count)
+// Did the file fail BECAUSE of this defect type? (verdict-deciding only)
 $validator->isFailing('untranslated_copy');   // true when the verbatim gates fired
-$validator->isFailing('reading_speed');       // false on a merely slow-but-passing file
+$validator->isFailing('reading_speed');       // always false: pacing is advisory
 
 // Did this defect occur at all, regardless of the verdict?
 $validator->hasDefect('missing_caption');                // any severity
@@ -612,10 +611,12 @@ $validator->hasDefect('partial_translation', 'warning'); // severity-filtered
 
 `isFailing()` maps each defect type to the ratio gates that can decide the
 verdict (e.g. `untranslated_copy` → `verbatim_copy`/`near_verbatim_copy`,
-`reading_speed` → `pacing_*_share`) and checks them against the structured
+`reading_speed` → `pacing_*_share`, which are advisory and never fire) and
+checks them against the structured
 `quality.failed_gates` list — no string parsing of `reasons`. Under strict
 mode or a `max_errors` breach it attributes to error-severity defect types
-directly. Both probes throw a `LogicException` when `validate()` has not
+directly (density defects are always warnings, so pacing stays excluded even
+there). Both probes throw a `LogicException` when `validate()` has not
 run yet.
 
 The captions are aligned on the timeline before comparison (see

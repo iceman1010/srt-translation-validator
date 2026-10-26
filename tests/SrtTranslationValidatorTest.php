@@ -50,14 +50,14 @@ class SrtTranslationValidatorTest extends TestCase
             }
             if ($name === 'reading_speed') {
                 // Broadcast CC flashes legitimately exceed the profile cps
-                // limit; only the 5x error tier may fail (and does not here).
+                // limit; the peak factor is advisory information only.
                 $this->assertLessThanOrEqual(5.0, $ratio, 'Reading speed of a real translation stays under the error tier');
                 continue;
             }
             if ($name === 'pacing_over_limit_share' || $name === 'source_pollution_share') {
                 // Same broadcast CC flashes: a few over-limit captions are
-                // normal, far below the 50% widespread-density gate.
-                $this->assertLessThan(0.5, $ratio, 'Pacing shares of a real translation stay far below the gates');
+                // normal. The pacing shares are advisory - they gate nothing.
+                $this->assertLessThan(0.5, $ratio, 'Pacing shares of a real translation stay small');
                 continue;
             }
             $this->assertSame(0.0, $ratio, "Ratio {$name} should be zero for a perfect translation");

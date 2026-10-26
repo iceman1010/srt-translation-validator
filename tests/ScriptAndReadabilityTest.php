@@ -286,12 +286,13 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertSame(40.0, $defect['cps']);
         $this->assertSame(20.0, $defect['cps_limit']);
         $this->assertSame(2.0, $result['quality']['ratios']['reading_speed']);
-        // The peak factor is advisory now: the verdict uses the share
-        // gates, so the reading_speed threshold is null. Pacing shares are
-        // active; the minimum-count floor for a 3-caption file is 3/3.
+        // The peak factor is advisory now: pacing never gates the verdict,
+        // so the reading_speed threshold is null - as are both pacing
+        // share thresholds (advisory by policy since 2026-10-26).
         $this->assertNull($result['quality']['thresholds']['reading_speed']);
         $this->assertSame(0.0, $result['quality']['ratios']['pacing_error_share']);
-        $this->assertSame(1.0, $result['quality']['thresholds']['pacing_error_share']);
+        $this->assertNull($result['quality']['thresholds']['pacing_error_share']);
+        $this->assertNull($result['quality']['thresholds']['pacing_over_limit_share']);
 
         $readability = $result['quality']['readability'];
         $this->assertSame(40.0, $readability['max_cps']);
@@ -302,12 +303,13 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertLessThan(40.0, $readability['avg_cps']);
     }
 
-    public function testUnreadableCaptionFailsValidation(): void
+    public function testUnreadableCaptionsStayWarnings(): void
     {
         // All three translation cues need 111 cps (60 + space + 50 over 1s):
-        // far beyond the 5x default limit (100), and with 100% of captions
-        // unreadable the share gate fails the file. The source cues stay
-        // under their own limit (exemption off).
+        // far beyond the 5x default limit. Since 2026-10-26 pacing is
+        // advisory: the file stays valid, the captions stay visible as
+        // warnings. The source cues stay under their own limit (exemption
+        // off).
         $original = $this->write('original-u', [
             [1.0, 2.0, ['Okay.']],
             [4.0, 8.0, ['Everybody gets back to their seat.']],
@@ -321,17 +323,21 @@ class ScriptAndReadabilityTest extends TestCase
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
-        $this->assertFalse($result['valid']);
-        $this->assertStringContainsString(
-            'pacing over limit share',
-            implode(' ', $result['quality']['reasons'])
-        );
+        $this->assertTrue($result['valid'], 'Density is advisory: warnings must not fail the file');
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame(3, $result['warning_count']);
+        $this->assertSame([], $result['quality']['reasons']);
 
         $defect = $result['defects'][0];
         $this->assertSame('reading_speed', $defect['type']);
-        $this->assertSame('error', $defect['severity']);
+        $this->assertSame('warning', $defect['severity']);
         $this->assertSame(111.0, $defect['cps']);
         $this->assertSame(5.55, $result['quality']['ratios']['reading_speed']);
+        // The error-tier share is still reported (cue 1 needs >5x the
+        // limit; cues 2-3 at 1.4x stay below the tier), but its threshold
+        // is null: it gates nothing.
+        $this->assertSame(0.3333, $result['quality']['ratios']['pacing_error_share']);
+        $this->assertNull($result['quality']['thresholds']['pacing_error_share']);
     }
 
     public function testInheritedOverloadIsExempt(): void
@@ -383,12 +389,12 @@ class ScriptAndReadabilityTest extends TestCase
         $this->assertSame([], $result['defects']);
     }
 
-    public function testSourceBelowNearOverloadThresholdStillFlags(): void
+    public function testSourceBelowNearOverloadThresholdStillWarns(): void
     {
         // The source cues run at or below 15 of 20 cps (75%, below the 80%
         // overload threshold): there was headroom, so the unreadable
-        // translations are flagged - and with 100% of captions unreadable
-        // the share gate fails the file.
+        // translations are flagged - as warnings, since pacing is advisory
+        // by policy and can never fail the file.
         $original = $this->write('original-headroom', [
             [1.0, 2.0, ['Okay, I suppose']],
             [4.0, 8.0, ['Everybody gets back to their seat.']],
@@ -402,19 +408,19 @@ class ScriptAndReadabilityTest extends TestCase
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
-        // Cue 1 is error-tier (111 cps over 1s); cues 2-3 are warning-tier
-        // (27.8 cps over 4s) - but ALL captions are over the limit, so the
-        // widespread-density share gate (>= 50%) fails the file.
-        $this->assertFalse($result['valid']);
-        $this->assertSame(1, $result['error_count']);
+        // Cue 1 needs 111 cps over 1s (>5x tier); cues 2-3 need 27.8 cps
+        // over 4s - all flagged, all warnings, verdict stays valid.
+        $this->assertTrue($result['valid'], 'Density is advisory: warnings must not fail the file');
+        $this->assertSame(0, $result['error_count']);
+        $this->assertSame(3, $result['warning_count']);
         $this->assertSame('reading_speed', $result['defects'][0]['type']);
     }
 
     public function testIsolatedUnreadableCaptionStaysBelowTheVerdict(): void
     {
-        // One 111-cps caption out of twenty (5% of a small file, but below
-        // the 3-caption floor) is a flagged error-severity defect, yet it
-        // must not fail the whole file: the pacing verdict is share-based.
+        // One 111-cps caption out of twenty is a flagged defect, but pacing
+        // is advisory by policy: even far-beyond-limit density stays a
+        // warning and must not fail the whole file.
         $sourceCues = [[1.0, 2.0, ['Okay.']]];
         $translationCues = [[1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]]];
         for ($i = 2; $i <= 20; $i++) {
@@ -429,15 +435,16 @@ class ScriptAndReadabilityTest extends TestCase
         $result = $this->validator->validate($original, $translation, 'hu');
 
         $this->assertTrue($result['valid'], 'A single unreadable caption must not fail the file');
-        $this->assertSame(1, $result['error_count'], 'The caption itself is still flagged error-tier');
+        $this->assertSame(0, $result['error_count'], 'Density never produces error-severity defects');
+        $this->assertSame(1, $result['warning_count'], 'The caption itself is still flagged');
     }
 
-    public function testPollutedSourceDemotesPacingToAdvisory(): void
+    public function testPollutedSourceKeepsPacingAdvisory(): void
     {
         // One in twenty source cues carries a fansub annotation (leading
-        // "*" marker, production error #2 pattern): above the 1% pollution
-        // share the pacing verdict becomes advisory, so even a fully
-        // over-limit translation cannot fail on pacing alone.
+        // "*" marker, production error #2 pattern). The pollution share is
+        // reported, and pacing is advisory anyway: even a fully over-limit
+        // translation cannot fail on density alone.
         $sourceCues = [[1.0, 3.0, ['*Megjegyzes: ez egy hosszabb szerkesztoi beiras a fansub Kiadasbol']]];
         $translationCues = [[1.0, 3.0, [str_repeat('é', 40)]]];
         for ($i = 2; $i <= 20; $i++) {
@@ -451,8 +458,9 @@ class ScriptAndReadabilityTest extends TestCase
 
         $result = $this->validator->validate($original, $translation, 'hu');
 
-        $this->assertTrue($result['valid'], 'A polluted source demotes pacing to advisory');
+        $this->assertTrue($result['valid'], 'Pacing is advisory regardless of source pollution');
         $this->assertNull($result['quality']['thresholds']['pacing_over_limit_share']);
+        $this->assertNull($result['quality']['thresholds']['pacing_error_share']);
         $this->assertGreaterThanOrEqual(0.01, $result['quality']['ratios']['source_pollution_share']);
         $this->assertGreaterThan(0, $result['warning_count'], 'The over-limit captions are still reported');
     }
@@ -481,8 +489,9 @@ class ScriptAndReadabilityTest extends TestCase
 
     public function testIsFailingIsFalseWhenTheVerdictIsValid(): void
     {
-        // One isolated unreadable caption (below the share gates): the
-        // defect exists with error severity, but nothing failed.
+        // One isolated unreadable caption: the defect exists (as a warning
+        // - pacing is advisory by policy, so it can never be error-tier),
+        // but nothing failed.
         $sourceCues = [[1.0, 2.0, ['Okay.']]];
         $translationCues = [[1.0, 2.0, [str_repeat('é', 60), str_repeat('a', 50)]]];
         for ($i = 2; $i <= 20; $i++) {
@@ -496,7 +505,8 @@ class ScriptAndReadabilityTest extends TestCase
             'hu'
         );
 
-        $this->assertTrue($this->validator->hasDefect('reading_speed', 'error'));
+        $this->assertTrue($this->validator->hasDefect('reading_speed'));
+        $this->assertFalse($this->validator->hasDefect('reading_speed', 'error'));
         $this->assertFalse($this->validator->isFailing('reading_speed'));
     }
 

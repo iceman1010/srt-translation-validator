@@ -58,31 +58,19 @@ final class SrtTranslationValidator
     private const DEFAULT_MAX_SCRIPT_RATIO = 0.01;
 
     /**
-     * Reading-speed error factor: a caption only fails the file when its
-     * text needs this multiple of the profile cps limit. Below it, over-
-     * limit captions are warnings - squeezed or dense, but still readable.
+     * Reading-speed tier factor: a caption needing this multiple of the
+     * profile cps limit counts into pacing_error_share and reads "far
+     * above" in its message. Density is advisory by policy (2026-10-26):
+     * it never decides the verdict in any mode - the per-caption defects
+     * are warnings and the pacing share thresholds are null.
      */
     private const READING_SPEED_ERROR_FACTOR = 5.0;
 
     /**
-     * Pacing verdict, share-based (a single bad caption must not fail a
-     * 900-caption file). The file fails only when the density problem is
-     * either substantial (this share of captions is error-tier, i.e. needs
-     * more than READING_SPEED_ERROR_FACTOR times the limit) or widespread
-     * (PACING_OVER_LIMIT_SHARE of all captions exceed the limit at all).
-     * Smaller shares stay per-caption warnings.
-     */
-    private const PACING_ERROR_SHARE = 0.02;
-    /** Minimum error-tier caption count for the share gate (tiny files). */
-    private const PACING_ERROR_MIN_COUNT = 3;
-    /** Share of captions over the limit (warning or error tier) that means widespread density. */
-    private const PACING_OVER_LIMIT_SHARE = 0.5;
-
-    /**
-     * When at least this share of SOURCE cues carry non-dialogue pollution
-     * (markup blobs, annotation markers), the pacing verdict downgrades to
-     * advisory: the reading load may be inherited from the source, so it
-     * cannot decide the translation's fate.
+     * Share of SOURCE cues carrying non-dialogue pollution (markup blobs,
+     * annotation markers). Informational: a polluted source makes the
+     * reading load suspect as inherited, which is one more reason pacing
+     * must not decide the verdict.
      */
     private const SOURCE_POLLUTION_SHARE = 0.01;
 
@@ -452,16 +440,15 @@ final class SrtTranslationValidator
             $defects[] = $defect;
         }
 
-        // Pacing verdict, share-based: a single bad caption must not fail a
-        // 900-caption file, and a polluted source demotes pacing to advisory
-        // (the reading load may be inherited, so it cannot decide the
-        // translation's fate).
+        // Pacing is advisory by policy (2026-10-26): density warnings are
+        // information for humans, never a reason to reject the translation.
+        // The shares stay reported below so the information is not lost.
         $pollutionShare = $this->sourcePollutionShare($originalBlocks);
-        $pacingAdvisory = $pollutionShare >= self::SOURCE_POLLUTION_SHARE;
         $errorTier = 0;
         $overLimit = count($readingSpeed['defects']);
         foreach ($readingSpeed['defects'] as $defect) {
-            if ($defect['severity'] === 'error') {
+            if ($defect['cps_limit'] > 0
+                && $defect['cps'] / $defect['cps_limit'] > self::READING_SPEED_ERROR_FACTOR) {
                 $errorTier++;
             }
         }
@@ -491,9 +478,8 @@ final class SrtTranslationValidator
                     ? round($stats['copy_pairs_excluded'] / $stats['copy_pairs'], 4)
                     : 0.0,
                 'unexpected_script' => $scriptRatio,
-                // Advisory: the peak factor is reported for inspection, but
-                // the verdict uses the share gates below (or nothing at all
-                // when the source is polluted).
+                // Advisory: the peak factor is reported for inspection;
+                // pacing never gates the verdict.
                 'reading_speed' => $readingSpeed['peak'],
                 'pacing_error_share' => round($errorTier / $captionCount, 4),
                 'pacing_over_limit_share' => round($overLimit / $captionCount, 4),
@@ -514,13 +500,10 @@ final class SrtTranslationValidator
                 'target_language_copy_share' => null,
                 'unexpected_script' => $this->maxScriptRatio,
                 'reading_speed' => null,
-                // Share gates: substantial and/or widespread density fails;
-                // isolated over-limit captions stay warnings. A polluted
-                // source demotes pacing to advisory (null thresholds).
-                'pacing_error_share' => $pacingAdvisory
-                    ? null
-                    : max(self::PACING_ERROR_SHARE, self::PACING_ERROR_MIN_COUNT / (float) $captionCount),
-                'pacing_over_limit_share' => $pacingAdvisory ? null : self::PACING_OVER_LIMIT_SHARE,
+                // Advisory by policy (2026-10-26): density never fails a
+                // translation. Both shares stay reported for humans.
+                'pacing_error_share' => null,
+                'pacing_over_limit_share' => null,
                 'source_pollution_share' => null,
                 'unaligned' => null,
             ],
@@ -1134,14 +1117,13 @@ final class SrtTranslationValidator
     }
 
     /**
-     * Per-caption reading-speed gate over the translation cues. A caption
+     * Per-caption reading-speed check over the translation cues. A caption
      * whose text needs more than the language profile's cps limit to read
      * is a warning; beyond READING_SPEED_ERROR_FACTOR times the limit the
      * text cannot realistically be read within its display time and the
-     * defect is error-severity. The VERDICT never rides on a single
-     * caption: it uses the share gates in validate() (pacing_error_share /
-     * pacing_over_limit_share), because one isolated bad cue must not fail
-     * a 900-caption file.
+     * message says "far above". The defect is ALWAYS warning-severity:
+     * pacing is advisory by policy (2026-10-26) and must never decide the
+     * verdict, not even under strict mode or a max_errors limit.
      *
      * Inheritance exemption: when a cue's aligned source caption already
      * runs at SOURCE_OVERLOAD_FACTOR (80%) or more of its own language's
@@ -1199,7 +1181,7 @@ final class SrtTranslationValidator
             $error = $factor > self::READING_SPEED_ERROR_FACTOR;
             $defects[] = [
                 'type' => 'reading_speed',
-                'severity' => $error ? 'error' : 'warning',
+                'severity' => 'warning',
                 'message' => sprintf(
                     'Caption #%d needs %.1f cps to read within its %.1fs display time, %s the %.1f cps limit of the %s profile',
                     $index + 1,
