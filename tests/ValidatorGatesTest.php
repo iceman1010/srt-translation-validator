@@ -235,17 +235,21 @@ class ValidatorGatesTest extends TestCase
         // A lightly edited copy: not exactly verbatim, but ~98% similar.
         // It must fail as an edited_copy - a different failure mode than a
         // pure untranslated_copy (model tweaked the source vs. returned it).
-        $source = $this->writeSrt('source.srt', [
-            [0, 2, 'The quick brown fox jumps over the lazy dog near the river bank'],
-        ]);
-        $edited = $this->writeSrt('edited.srt', [
-            [0, 2, 'The quick brown fox jumps over the lazy dog near the river banks'],
-        ]);
-        $exact = $this->writeSrt('exact.srt', [
-            [0, 2, 'The quick brown fox jumps over the lazy dog near the river bank'],
-        ]);
+        // The fixture is deliberately LARGE (> 5000 chars of copy text): a
+        // corpus that small-sample mode could not language-diagnose would
+        // demote the near-verbatim gate instead (see the small-corpus tests).
+        $cues = [];
+        $edited = [];
+        for ($i = 0; $i < 90; $i++) {
+            $start = $i * 3.0;
+            $cues[] = [$start, $start + 2.8, "English dialogue sentence number $i which carries enough words to fill the copy corpus"];
+            $edited[] = [$start, $start + 2.8, "English dialogue sentence number $i which holds enough words to fill the copy corpus"];
+        }
+        $source = $this->writeSrt('source.srt', $cues);
+        $editedFile = $this->writeSrt('edited.srt', $edited);
+        $exact = $this->writeSrt('exact.srt', $cues);
 
-        $result = $this->validator->validate($source, $edited, 'nl');
+        $result = $this->validator->validate($source, $editedFile, 'nl');
         $this->assertFalse($result['valid'], 'A lightly edited copy must fail the near-verbatim gate');
         $this->assertCount(1, array_filter($result['defects'], fn ($d) => $d['type'] === 'edited_copy'));
         $this->assertCount(0, array_filter($result['defects'], fn ($d) => $d['type'] === 'untranslated_copy'));
@@ -262,8 +266,90 @@ class ValidatorGatesTest extends TestCase
         // The threshold is overridable: with the near-verbatim limit at 100%
         // the edited pair stays usable.
         $this->validator->setMaxNearVerbatimRatio(1.0);
-        $result = $this->validator->validate($source, $edited, 'nl');
+        $result = $this->validator->validate($source, $editedFile, 'nl');
         $this->assertTrue($result['valid'], 'A raised near-verbatim limit must let the edited pair pass');
+    }
+
+    public function testSmallCopyCorpusPartialCopyStaysWarning(): void
+    {
+        // Production error #29 pattern: a 4-cue YTS watermark file (nl->en).
+        // 3 cues are brand boilerplate that reads the same in both
+        // languages, one cue is genuinely paraphrased (Find -> Visit). The
+        // copy corpus is ~100 bytes, far below the 5000-char language-
+        // detection floor: indeterminate. A majority of copies proves
+        // nothing there, so the finding demotes to a warning and the file
+        // stays usable.
+        $source = $this->writeSrt('yts-source.srt', [
+            [30.0, 36.0, 'Provided by YTS.LT'],
+            [36.5, 42.0, 'Find the official YIFY movies site at https://YTS.LT'],
+            [1830.0, 1836.0, 'Downloaded from YTS.LT'],
+            [3630.0, 3636.0, 'Download more movies for free from YTS.LT'],
+        ]);
+        $translation = $this->writeSrt('yts-translation.srt', [
+            [30.0, 36.0, 'Provided by YTS.LT'],
+            [36.5, 42.0, 'Visit the official YIFY movies site at https://YTS.LT'],
+            [1830.0, 1836.0, 'Downloaded from YTS.LT'],
+            [3630.0, 3636.0, 'Download more movies for free from YTS.LT'],
+        ]);
+
+        $result = $this->validator->validate($source, $translation, 'en');
+
+        $this->assertTrue($result['valid'], 'A tiny boilerplate file must not fail as an untranslated copy');
+        $copies = array_values(array_filter($result['defects'], fn ($d) => $d['type'] === 'untranslated_copy'));
+        $this->assertCount(1, $copies, 'The copy observation stays visible');
+        $this->assertSame('warning', $copies[0]['severity']);
+        $this->assertStringContainsString('too small', $copies[0]['message']);
+        $this->assertSame(0.75, $result['quality']['ratios']['verbatim_copy']);
+        $this->assertSame(0.9, $result['quality']['thresholds']['verbatim_copy']);
+        $this->assertNull($result['quality']['thresholds']['near_verbatim_copy']);
+    }
+
+    public function testSmallCopyCorpusFullCopyStillFails(): void
+    {
+        // Same tiny size, but every cue came back word-for-word: that is a
+        // genuine small passthrough, and the raised bar (>= 90% verbatim)
+        // still fails it.
+        $captions = [
+            [0.0, 2.0, 'Hello there my friend'],
+            [2.0, 4.0, 'How are you today'],
+            [4.0, 6.0, 'I am fine thank you'],
+            [6.0, 8.0, 'And how are you doing'],
+        ];
+        $source = $this->writeSrt('small-source.srt', $captions);
+        $copy = $this->writeSrt('small-copy.srt', $captions);
+
+        $result = $this->validator->validate($source, $copy, 'nl');
+
+        $this->assertFalse($result['valid'], 'A full verbatim copy fails even on the raised small-sample bar');
+        $copies = array_values(array_filter($result['defects'], fn ($d) => $d['type'] === 'untranslated_copy'));
+        $this->assertCount(1, $copies);
+        $this->assertSame('error', $copies[0]['severity']);
+        $this->assertSame(0.9, $result['quality']['thresholds']['verbatim_copy']);
+    }
+
+    public function testSmallEditedCopyStaysWarning(): void
+    {
+        // Three lightly edited cues (0% verbatim, 100% near-verbatim): the
+        // similarity score is dominated by shared boilerplate on short
+        // cues, so in small-sample mode near-verbatim can never fail the
+        // file - the finding demotes to a warning.
+        $cues = [];
+        $edited = [];
+        for ($i = 0; $i < 3; $i++) {
+            $start = $i * 3.0;
+            $cues[] = [$start, $start + 2.8, "The quick brown fox number $i jumps over the lazy dog near the river bank"];
+            $edited[] = [$start, $start + 2.8, "The quick brown fox number $i jumps over the lazy dog near the river banks"];
+        }
+        $source = $this->writeSrt('small-edited-source.srt', $cues);
+        $editedFile = $this->writeSrt('small-edited.srt', $edited);
+
+        $result = $this->validator->validate($source, $editedFile, 'nl');
+
+        $this->assertTrue($result['valid'], 'Near-verbatim similarity cannot fail a small-sample file');
+        $copies = array_values(array_filter($result['defects'], fn ($d) => $d['type'] === 'edited_copy'));
+        $this->assertCount(1, $copies, 'The edited-copy observation stays visible');
+        $this->assertSame('warning', $copies[0]['severity']);
+        $this->assertNull($result['quality']['thresholds']['near_verbatim_copy']);
     }
 
     /**

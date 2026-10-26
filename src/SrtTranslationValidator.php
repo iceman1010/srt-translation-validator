@@ -27,6 +27,19 @@ final class SrtTranslationValidator
     /** ...and at least this share of compared pairs. */
     private const MIXED_SOURCE_MIN_TRANSLATED_SHARE = 0.10;
 
+    /**
+     * Copy-gate bar for files whose copy corpus is too small for language
+     * detection (below MIN_CHUNK_CHARS - the corpus check returns
+     * "indeterminate"). A majority of copies proves nothing on a tiny
+     * sample, so only near-total verbatim agreement fails the file; the
+     * near-verbatim similarity NEVER gates there because URLs and brand
+     * names dominate it on short boilerplate cues (production error #29: a
+     * 4-cue YTS watermark file scored 100% near-verbatim while one cue was
+     * genuinely paraphrased). Everything below the bar stays visible as
+     * warnings.
+     */
+    private const SMALL_CORPUS_VERBATIM_RATIO = 0.90;
+
     /** Maximum caption text length kept in missing-caption defects. */
     private const TEXT_PREVIEW_LENGTH = 100;
 
@@ -348,15 +361,34 @@ final class SrtTranslationValidator
             ];
         }
 
+        // Copy-gate thresholds: with an INDETERMINATE copy corpus (too
+        // small for language detection) a majority of copies proves
+        // nothing, so only near-total verbatim agreement (>= 0.9) may fail
+        // the file, and near-verbatim similarity never gates (URLs and
+        // brand names dominate it on short cues - production error #29).
+        // Everything else keeps the operator's thresholds.
+        // NOTE: `??` cannot be used here - it would collapse the indeterminate
+        // null into the "not target" default and silently disable the mode.
+        $smallCopySample = array_key_exists('copy_corpus_target', $stats)
+            && $stats['copy_corpus_target'] === null;
+        $verbatimGate = $passthrough ? null
+            : ($smallCopySample
+                ? max(self::SMALL_CORPUS_VERBATIM_RATIO, $this->maxVerbatimRatio)
+                : $this->maxVerbatimRatio);
+        $nearVerbatimGate = $passthrough ? null
+            : ($smallCopySample ? null : $this->maxNearVerbatimRatio);
+
         if (!$passthrough && $stats['compared_pairs'] > 0 && $stats['verbatim_ratio'] > $this->maxVerbatimRatio) {
+            $verbatimError = $verbatimGate !== null && $stats['verbatim_ratio'] > $verbatimGate;
             $defects[] = [
                 'type' => 'untranslated_copy',
-                'severity' => 'error',
+                'severity' => $verbatimError ? 'error' : 'warning',
                 'message' => sprintf(
-                    '%d of %d aligned captions are verbatim copies of the source (%.1f%%) - this appears to be an untranslated copy',
+                    '%d of %d aligned captions are verbatim copies of the source (%.1f%%)%s - this appears to be an untranslated copy',
                     $stats['identical_pairs'],
                     $stats['compared_pairs'],
-                    $stats['verbatim_ratio'] * 100
+                    $stats['verbatim_ratio'] * 100,
+                    $verbatimError ? '' : '; copy corpus too small for language diagnosis, only near-total agreement fails'
                 ),
                 'identical_pairs' => $stats['identical_pairs'],
                 'compared_pairs' => $stats['compared_pairs'],
@@ -369,15 +401,17 @@ final class SrtTranslationValidator
             // The exact-copy gate did not fire, but the translation is still
             // dominated by near-identical pairs: the model returned the
             // source with light cosmetic editing.
+            $nearError = $nearVerbatimGate !== null && $stats['near_verbatim_ratio'] > $nearVerbatimGate;
             $defects[] = [
                 'type' => 'edited_copy',
-                'severity' => 'error',
+                'severity' => $nearError ? 'error' : 'warning',
                 'message' => sprintf(
-                    '%d of %d aligned captions are identical or nearly identical (>=90%% similar) to the source (%.1f%%), but only %.1f%% are exactly identical - this appears to be an edited, untranslated copy',
+                    '%d of %d aligned captions are identical or nearly identical (>=90%% similar) to the source (%.1f%%), but only %.1f%% are exactly identical%s - this appears to be an edited, untranslated copy',
                     $stats['identical_pairs'] + $stats['near_verbatim_pairs'],
                     $stats['compared_pairs'],
                     $stats['near_verbatim_ratio'] * 100,
-                    $stats['verbatim_ratio'] * 100
+                    $stats['verbatim_ratio'] * 100,
+                    $nearError ? '' : '; copy corpus too small for language diagnosis, near-verbatim similarity cannot fail it'
                 ),
                 'identical_pairs' => $stats['identical_pairs'],
                 'near_identical_pairs' => $stats['near_verbatim_pairs'],
@@ -495,8 +529,10 @@ final class SrtTranslationValidator
                 'merged' => $mergeThreshold,
                 // Advisory while a passthrough: an unchanged copy is the
                 // expected output, so neither copy ratio gates anything.
-                'verbatim_copy' => $passthrough ? null : $this->maxVerbatimRatio,
-                'near_verbatim_copy' => $passthrough ? null : $this->maxNearVerbatimRatio,
+                // Small-sample mode (indeterminate corpus) raises the
+                // verbatim bar and drops the near gate (see above).
+                'verbatim_copy' => $verbatimGate,
+                'near_verbatim_copy' => $nearVerbatimGate,
                 'target_language_copy_share' => null,
                 'unexpected_script' => $this->maxScriptRatio,
                 'reading_speed' => null,
@@ -763,7 +799,7 @@ final class SrtTranslationValidator
      * @param list<array{start: float, end: float, lines: list<string>}> $translationBlocks
      * @param string $expectedLanguage target language, for the copy-corpus
      *        mixed-source decision (see copyCorpusIsTargetLanguage())
-     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int, copy_pairs: int, copy_pairs_excluded: int}}
+     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int, copy_pairs: int, copy_pairs_excluded: int, copy_corpus_target: bool|null}}
      */
     private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks, string $expectedLanguage): array
     {
@@ -922,11 +958,14 @@ final class SrtTranslationValidator
         // the file must ALSO show real translation work elsewhere, otherwise
         // it is a source that is already entirely in the target language
         // (production error #23: a Finnish file submitted as en->fi), and
-        // the copy gate must keep failing it.
+        // the copy gate must keep failing it. A null verdict (indeterminate
+        // corpus - too small to detect) is handled by the copy gates, which
+        // raise their bar for near-total verbatim agreement instead.
         $excludedCopies = 0;
-        $corpusIsTarget = $copyPairs !== []
-            && $this->copyCorpusIsTargetLanguage($copyPairs, $expectedLanguage);
-        if ($corpusIsTarget) {
+        $corpusIsTarget = $copyPairs === []
+            ? false
+            : $this->copyCorpusIsTargetLanguage($copyPairs, $expectedLanguage);
+        if ($corpusIsTarget === true) {
             $workPairs = $comparedPairs - count($copyPairs);
             if ($workPairs >= self::MIXED_SOURCE_MIN_TRANSLATED
                 && $workPairs >= self::MIXED_SOURCE_MIN_TRANSLATED_SHARE * $comparedPairs) {
@@ -1086,12 +1125,15 @@ final class SrtTranslationValidator
      * text is a real untranslated passthrough. The corpus is kilobytes of
      * text - a reliable sample, unlike per-cue detection of short captions.
      *
-     * Conservative fallback: with too little copy text to judge (or a
-     * failed detection), the copies COUNT (gate behaves as before).
+     * Tri-state: null means INDETERMINATE - too little copy text to judge
+     * (below MIN_CHUNK_CHARS) or a failed detection. The caller then raises
+     * the copy-gate bar instead of trusting a majority of copies on a tiny
+     * sample. null is NOT "not target": a detected source-dominant corpus
+     * returns false and the gates behave as before.
      *
      * @param list<array{kind: string, text: string}> $copyPairs
      */
-    private function copyCorpusIsTargetLanguage(array $copyPairs, string $expectedLanguage): bool
+    private function copyCorpusIsTargetLanguage(array $copyPairs, string $expectedLanguage): ?bool
     {
         $expectedLanguage = ScriptChecker::baseLanguage($expectedLanguage);
 
@@ -1103,12 +1145,16 @@ final class SrtTranslationValidator
             }
         }
         if (strlen($corpus) < self::MIN_CHUNK_CHARS) {
-            return false;
+            return null;
         }
 
-        $detections = $this->languageDetector->detect($corpus)->close();
+        try {
+            $detections = $this->languageDetector->detect($corpus)->close();
+        } catch (\Throwable $e) {
+            return null;
+        }
         if (!$detections) {
-            return false;
+            return null;
         }
 
         $detectedLanguage = ScriptChecker::baseLanguage((string) array_key_first($detections));
