@@ -159,7 +159,7 @@ compares them, and prints a human-readable report.
 | `-j, --json`           | Print the report as JSON (for scripts, agents and LLMs). Exit codes are unchanged. |
 | `--strict`             | Fail on any error-severity defect, ignoring the quality-ratio limits.    |
 | `--max-loss-ratio=F`   | Max share of source captions with no translation at all (default: `0.01`). |
-| `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). |
+| `--max-drift-ratio=F`  | Max share of aligned captions with timestamp drift beyond the tolerance (default: `0.02`). Raise to `1` when re-validating a file repaired by [srt-translation-fixer](../srt-translation-fixer) — its timing repairs are intentional drift (see "Re-validating a repaired file"). |
 | `--max-merge-ratio=F`  | Max share of source captions merged into neighbouring captions. Default: derived from the language pair (see "Adaptive merge tolerance"), 0.10 for same-density pairs. |
 | `--max-verbatim-ratio=F` | Max share of aligned captions that may be verbatim copies of the source (default: `0.50`). |
 | `--max-near-verbatim-ratio=F` | Max share of aligned captions that may be identical or >=90% similar to the source; catches copies with light cosmetic edits as `edited_copy` (default: `0.50`). |
@@ -197,7 +197,28 @@ srt-translation-validator -t 0.1 -l de Movie.en.srt Movie.pt.srt
 
 # Machine-readable output for scripts, agents and LLMs
 srt-translation-validator original.srt translation.srt -l de --json
+
+# Re-validate a file repaired by srt-translation-fixer: its timing
+# repairs (reading-time extensions into gaps) are intentional drift,
+# so the drift gate is raised instead of tripped
+srt-translation-validator original.srt fixed.srt -l de --max-drift-ratio=1
 ```
+
+### Re-validating a repaired file
+
+The intended pipeline order is: **validate the raw translation** (verdict,
+gates, billing on exactly what the engine produced) → **repair** with
+[srt-translation-fixer](../srt-translation-fixer) → **deliver the fixed
+file**. A fixed file should normally not be re-validated at all — but when
+it must be (e.g. a manual spot-check), keep two things in mind:
+
+- Reading-time extensions move cue ends past the `-t` tolerance **by
+  design**; with the default `--max-drift-ratio=0.02` the drift gate
+  fails exactly the files the fixer helped most. Pass
+  `--max-drift-ratio=1` to expect the drift.
+- The `timestamp_mismatch` defects then still appear in the report
+  (error severity) — they are the repair itself. They do not fail the
+  verdict unless `--strict` or `--max-errors` is used.
 
 ### JSON output
 
@@ -481,6 +502,40 @@ foreach ($result['defects'] as $i => $defect) {
         $defect['message']
     );
 }
+```
+
+### Expecting intentional drift (repaired files)
+
+When the file being validated was repaired by
+[srt-translation-fixer](../srt-translation-fixer), timestamp drift is not
+engine failure — it is the repair (reading-time extensions into gaps).
+Expect it instead of rejecting it:
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use SrtValidator\SrtTranslationValidator;
+
+$validator = new SrtTranslationValidator();
+
+// Tolerate drift on every aligned pair: the fixer's timing repairs
+// are intentional, not engine drift. Without this, the drift gate
+// (2% of pairs by default) rejects exactly the repaired cues.
+$validator->setMaxDriftRatio(1.0);
+
+$result = $validator->validate('original.srt', 'fixed.srt', 'de');
+
+if ($result['valid']) {
+    // The verdict passes; the timestamp_mismatch defects still listed
+    // are the fixer's repairs (error severity, but ratio-judged).
+    echo "Repaired file is usable.\n";
+}
+
+// To judge the ENGINE rather than the repair, validate the raw
+// translation before the fixer runs - that is the intended order:
+// validate -> repair -> deliver.
 ```
 
 ### Result structure
