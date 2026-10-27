@@ -564,4 +564,123 @@ class ValidatorGatesTest extends TestCase
         $this->assertSame(0.05, $result['quality']['thresholds']['merged']);
         $this->assertContains('merged 25.00% exceeds the threshold 5.00%', $result['quality']['reasons']);
     }
+
+    /**
+     * Error #4 class (2026-10-27): a source cue whose text is split by a
+     * whitespace-only line, orphaning the sentence continuation where a
+     * timestamp belongs. The pipeline leaks the fragment verbatim into the
+     * translation, where the format gate orphans it again.
+     */
+    private function writeInheritedCorruptionPair(string $orphanInTranslation): array
+    {
+        $source = $this->tmp . '/inherited-source.it.srt';
+        file_put_contents($source, implode("\n", [
+            '1',
+            '00:00:01,000 --> 00:00:03,000',
+            'prima riga del source',
+            '',
+            '2',
+            '00:00:03,100 --> 00:00:05,000',
+            'seconda riga del source',
+            ' ',
+            'the orphan continuation text',
+            '',
+            '3',
+            '00:00:05,100 --> 00:00:07,000',
+            'terza riga del source',
+            '',
+            '',
+        ]));
+
+        $translation = $this->tmp . '/inherited-target.ja.srt';
+        file_put_contents($translation, implode("\n", [
+            '1',
+            '00:00:01,000 --> 00:00:03,000',
+            '最初の行です',
+            '',
+            '2',
+            '00:00:03,100 --> 00:00:05,000',
+            '二番目の行です',
+            ' ',
+            $orphanInTranslation,
+            '',
+            '3',
+            '00:00:05,100 --> 00:00:07,000',
+            '三番目の行です',
+            '',
+            '',
+        ]));
+
+        return [$source, $translation];
+    }
+
+    public function testSourceInheritedCorruptionIsAttributedNotModelBlamed(): void
+    {
+        [$source, $translation] = $this->writeInheritedCorruptionPair('the orphan continuation text');
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $this->assertFalse($result['valid'], 'The translation is undeliverable regardless of attribution');
+
+        $types = array_column($result['defects'], 'type');
+        $this->assertContains('invalid_format', $types, 'The format error still stands');
+        $this->assertContains('source_corruption_inherited', $types, 'The inherited corruption is attributed');
+
+        $inherited = array_values(array_filter(
+            $result['defects'],
+            fn (array $d): bool => $d['type'] === 'source_corruption_inherited'
+        ))[0];
+        $this->assertSame('warning', $inherited['severity'], 'Attribution must not fail the model twice');
+        $this->assertSame([9], $inherited['source_lines'], 'The orphan line sits at source line 9');
+        $this->assertNotEmpty($inherited['translation_lines']);
+
+        $this->assertTrue($this->validator->hasDefect('source_corruption_inherited'));
+    }
+
+    public function testCleanSourceKeepsFormatFailureModelSide(): void
+    {
+        // Error #28 shape: the orphan fragment is target-language text with
+        // no source counterpart - a translation-side failure.
+        [$source, $translation] = $this->writeInheritedCorruptionPair('ここは翻訳側の抜け行です');
+
+        // Replace the source with a clean version of the same cues.
+        $cleanSource = $this->tmp . '/clean-source.it.srt';
+        file_put_contents($cleanSource, implode("\n", [
+            '1',
+            '00:00:01,000 --> 00:00:03,000',
+            'prima riga del source',
+            '',
+            '2',
+            '00:00:03,100 --> 00:00:05,000',
+            'seconda riga del source',
+            '',
+            '3',
+            '00:00:05,100 --> 00:00:07,000',
+            'terza riga del source',
+            '',
+            '',
+        ]));
+
+        $result = $this->validator->validate($cleanSource, $translation, 'ja');
+
+        $this->assertFalse($result['valid']);
+        $types = array_column($result['defects'], 'type');
+        $this->assertContains('invalid_format', $types);
+        $this->assertNotContains('source_corruption_inherited', $types, 'No source counterpart - no inheritance');
+        $this->assertFalse($this->validator->hasDefect('source_corruption_inherited'));
+    }
+
+    public function testCorruptSourceWithoutVerbatimMatchStaysModelSide(): void
+    {
+        // Both files format-invalid, but the orphan lines differ: "both
+        // invalid" alone must not attribute the corruption to the source.
+        [$source, $translation] = $this->writeInheritedCorruptionPair('ein ganz anderer satz');
+
+        $result = $this->validator->validate($source, $translation, 'ja');
+
+        $this->assertFalse($result['valid']);
+        $types = array_column($result['defects'], 'type');
+        $this->assertContains('invalid_format', $types);
+        $this->assertNotContains('source_corruption_inherited', $types, 'Only a verbatim match proves inheritance');
+    }
 }

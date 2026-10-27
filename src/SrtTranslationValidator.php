@@ -263,7 +263,25 @@ final class SrtTranslationValidator
         // The translation is the artefact under review: any format failure in
         // the translation is a translation-model failure and fails the job.
         if ($translationFormat['format'] === null || !$translationFormat['valid']) {
-            return $this->buildResult($this->formatDefects($translationFormat));
+            $defects = $this->formatDefects($translationFormat);
+
+            // Error #4 class: the corruption that breaks the translation may
+            // sit verbatim in the source file itself (inherited, not
+            // model-caused). The verdict stays false - the file is
+            // undeliverable either way - but the attribution is recorded
+            // separately, so downstream consumers can bill the job to the
+            // user's input instead of to the model.
+            $inherited = $this->inheritedCorruptionDefect(
+                $originalFormat,
+                $translationFormat,
+                $originalPath,
+                $translationPath
+            );
+            if ($inherited !== null) {
+                $defects[] = $inherited;
+            }
+
+            return $this->buildResult($defects);
         }
         $defects = [];
 
@@ -753,6 +771,88 @@ final class SrtTranslationValidator
             ];
         }
         return $defects;
+    }
+
+    /**
+     * Error #4 class (found 2026-10-27): a corrupt source file - e.g. cue
+     * text split by a whitespace-only line, orphaning the sentence
+     * continuation where a timestamp belongs - leaks verbatim into the
+     * translation and fails its format gate. Detected precisely: the source
+     * must itself be format-invalid AND the orphan lines flagged in the
+     * translation must appear verbatim (trimmed) among the source's raw
+     * lines. Only a verbatim match attributes the corruption to the source;
+     * the same orphan shape with a clean source stays a model-side failure
+     * (error #28, hu->sl, target-language fragment without a source
+     * counterpart).
+     *
+     * Emits a warning (never an error): the invalid_format error already
+     * fails the undeliverable file, and the verdict must not punish the
+     * model for the user's input twice. Downstream billing can distinguish
+     * the classes via hasDefect('source_corruption_inherited').
+     *
+     * @param array{format: string|null, valid: bool, errors: list<array{line: int, subtype: string, message: string}>} $sourceFormat
+     * @param array{format: string|null, valid: bool, errors: list<array{line: int, subtype: string, message: string}>} $translationFormat
+     * @return array<string, mixed>|null the source_corruption_inherited defect, or null when the corruption is not provably inherited
+     */
+    private function inheritedCorruptionDefect(
+        array $sourceFormat,
+        array $translationFormat,
+        string $originalPath,
+        string $translationPath
+    ): ?array {
+        // A readable, format-valid source cannot have leaked the corruption.
+        if (($sourceFormat['format'] ?? null) === null || !empty($sourceFormat['valid'])) {
+            return null;
+        }
+
+        $orphanLineNumbers = [];
+        foreach ($translationFormat['errors'] ?? [] as $error) {
+            if (in_array($error['subtype'] ?? '', ['missing_timestamp', 'stray_text'], true)) {
+                $orphanLineNumbers[] = (int) ($error['line'] ?? 0);
+            }
+        }
+        if ($orphanLineNumbers === []) {
+            return null;
+        }
+
+        $translationLines = @file($translationPath, FILE_IGNORE_NEW_LINES);
+        $sourceLines = @file($originalPath, FILE_IGNORE_NEW_LINES);
+        if ($translationLines === false || $sourceLines === false) {
+            return null;
+        }
+
+        $sourceLines = array_map('trim', $sourceLines);
+        $sourceIndex = array_flip($sourceLines);
+
+        $matchedTranslationLines = [];
+        $matchedSourceLines = [];
+        foreach (array_unique($orphanLineNumbers) as $lineNumber) {
+            $text = trim($translationLines[$lineNumber - 1] ?? '');
+            if ($text === '' || !isset($sourceIndex[$text])) {
+                continue;
+            }
+            $matchedTranslationLines[] = $lineNumber;
+            $sourcePosition = array_search($text, $sourceLines, true);
+            if ($sourcePosition !== false) {
+                $matchedSourceLines[] = $sourcePosition + 1;
+            }
+        }
+
+        if ($matchedTranslationLines === []) {
+            return null;
+        }
+
+        return [
+            'type' => 'source_corruption_inherited',
+            'severity' => 'warning',
+            'message' => sprintf(
+                '%d orphan line(s) flagged in the translation appear verbatim in the malformed source file (first at source line %d): the corruption is inherited from the source, not a model failure - the job is still undeliverable',
+                count($matchedTranslationLines),
+                $matchedSourceLines[0] ?? 0
+            ),
+            'translation_lines' => $matchedTranslationLines,
+            'source_lines' => $matchedSourceLines,
+        ];
     }
 
     /**

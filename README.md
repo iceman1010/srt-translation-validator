@@ -19,6 +19,7 @@ timeline and reports these defect types:
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
 | `format_mismatch`     | warning  | Source and translation use different container formats (compared on cue structure anyway) |
 | `source_parse_failed` | warning  | The source file itself is malformed; the translation verdict is skipped  |
+| `source_corruption_inherited` | warning  | The format corruption that broke the translation appears verbatim in the (equally malformed) source file — inherited from the user's input, not a model failure. The `invalid_format` error still stands (the file is undeliverable); this defect only records attribution, e.g. for billing. Emitted only on a verbatim orphan-line match — the same orphan shape with a clean source stays model-side |
 | `same_language_passthrough` | warning | The source is already written in the target language (declared with `--source-lang`, or evident from its script); the verbatim/untranslated gates are skipped |
 
 ## The verdict: "usable", not "identical"
