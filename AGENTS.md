@@ -63,6 +63,14 @@
 - If multiple features are being worked on, confirm with the user before
   bundling them into a single commit or splitting them.
 
+### Testing & Measurement Discipline
+- Run EXACTLY the test the user asked for — same file, same model, same
+  flags, nothing extra. No self-initiated retry series, no bonus models,
+  no "while we're at it" sweeps.
+- When a run fails or a new question opens up: report the result and
+  WAIT for direction. Silence is not permission to spend more API tokens.
+- Every API call must trace back to an explicit user request.
+
 ### Editing Code — Non-Negotiable Discipline
 - Make minimal, scoped edits. NEVER replace a large block that contains
   unrelated code (a helper was silently deleted that way once). Target exact

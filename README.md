@@ -10,17 +10,20 @@ timeline and reports these defect types:
 | `missing_caption`     | warning  | Source captions with no translation counterpart (pairing-derived: merge artifacts look identical to real loss, so this is advisory; music/annotation-only cues are excluded) |
 | `partial_translation` | warning  | Large caption blocks detected in the wrong language. **Advisory only** - the detector label is decoration and never fails the verdict |
 | `timestamp_mismatch`  | error    | Aligned captions whose start/end times drifted beyond a tolerance       |
-| `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (same-language passthrough). On a copy corpus too small for language diagnosis (tiny files), only >= 90% verbatim fails; below that the finding is a warning |
+| `untranslated_copy`   | error    | Nearly all captions are verbatim copies of the source - the model returned the original untranslated. Skipped when the source is already in the target language (declared, script-evident, or copy-corpus-proven same-language request). On a copy corpus too small for language diagnosis (tiny files), only >= 90% verbatim fails; below that the finding is a warning |
 | `edited_copy`         | error/warning | Nearly all captions are identical or >=90% similar to the source, yet not exactly identical - the model returned the original with light cosmetic edits. A different failure mode than `untranslated_copy`. Warning-only when the copy corpus is too small for language diagnosis |
 | `unexpected_script`   | error    | Translation letters in a script foreign to the target language (character hallucination, e.g. Cyrillic in Hungarian); letters already spelled that way in the source are exempt |
 | `reading_speed`       | warning  | A translation caption whose text needs more than the target language's cps limit to read within its display time (message reads "far above" beyond 5x the limit). Captions whose aligned source cue already runs at >= 80% of its own limit are exempt - a translation cannot fix the source's timing. Pacing is advisory by policy: the defects are always warnings and never fail a file, in any mode |
 | `merged_captions`     | warning  | Source captions merged into a neighbouring translation caption (re-segmentation) |
+| `merge_timing`        | warning/error | A merged caption whose display window does not cover the union of its sources' windows (deficit beyond the pairing tolerance) - the engine fused text without fusing time. Error tier when the fused text then needs more than 1.25x the target profile's cps limit; a span miss that stays readable is a warning |
 | `split_captions`      | warning  | One source caption split across multiple translation captions           |
 | `extra_caption`       | warning  | Translation captions with no counterpart in the original                |
 | `format_mismatch`     | warning  | Source and translation use different container formats (compared on cue structure anyway) |
 | `source_parse_failed` | warning  | The source file itself is malformed; the translation verdict is skipped  |
-| `source_corruption_inherited` | warning  | The format corruption that broke the translation appears verbatim in the (equally malformed) source file — inherited from the user's input, not a model failure. The `invalid_format` error still stands (the file is undeliverable); this defect only records attribution, e.g. for billing. Emitted only on a verbatim orphan-line match — the same orphan shape with a clean source stays model-side |
+| `source_corruption_inherited` | warning  | The format corruption that broke the translation comes from the user's input, not a model failure. The `invalid_format` error still stands (the file is undeliverable); this defect only records attribution, e.g. for billing. Emitted on a verbatim orphan-line match in an equally malformed source, or - production error #38 - when the source's cue text is fused with the next cue's sequence number by a lost line break (`index_fused_into_text`): every engine translates the fused fragment and breaks on it. The same shapes with a clean source stay model-side |
 | `same_language_passthrough` | warning | The source is already written in the target language (declared with `--source-lang`, or evident from its script); the verbatim/untranslated gates are skipped |
+| `source_already_in_target_language` | warning | Undeclared same-language request (production errors #23/#39): nothing was declared and the script cannot tell Latin pairs apart, but >= 50% of the aligned captions are verbatim copies whose text determinately detects as the target language, with no real translation work anywhere. Wrong input, not a model failure: the copy gates are skipped and the file passes with this attribution. A genuine untranslated copy (corpus detects as the source language) keeps failing as `untranslated_copy` |
+| `source_timing_fusion` | warning  | Source-side `index_fused_into_text` corruption (production error #38: a lost line break fused cue text with the next cue's sequence number) while the translation survived it: the file stays usable, but the fragile source shape is recorded for intake and tooling |
 
 ## The verdict: "usable", not "identical"
 
@@ -37,6 +40,7 @@ then judges the translation by how much is actually wrong:
 | `timestamp_drift`    | aligned captions drifting beyond the tolerance       | 2%            |
 | `partial_translation`| translation characters detected in the wrong language (base-code comparison: `es-mx` target matches `es` detection) | advisory (no limit) |
 | `merged`             | source captions merged into neighbouring captions (content captions only) | advisory (no limit) — re-segmentation style, not a fault; real loss is measured by `content_loss`. `--max-merge-ratio` re-activates the gate |
+| `merge_timing`       | translation captions with an error-tier `merge_timing` defect (union miss AND more than 1.25x the cps limit to read) | 0.05% — one such caption fails any file up to ~2000 cues: a single unreadable flash is a customer complaint (2026-11 en→de deepl2 backward merges), not statistical noise. Readable span misses stay warnings and never count |
 | `verbatim_copy`      | aligned captions identical to the source             | 50%; raised to 90% when the copy corpus is too small for language diagnosis (tiny/boilerplate files), so only near-total agreement fails |
 | `near_verbatim_copy` | aligned captions identical or >= 90% similar to the source (lightly edited passthrough) | 50% (advisory during a same-language passthrough, and always advisory when the copy corpus is too small for language diagnosis - URLs/brand names dominate similarity on short cues) |
 | `unexpected_script`  | translation letters in a script foreign to the target language, not counting letters inherited from the source | 1% (small allowance for scientific notation such as Greek letters) |
@@ -47,8 +51,9 @@ then judges the translation by how much is actually wrong:
 | `unaligned`          | source captions with no aligned translation pair     | advisory (no limit) |
 
 - A translation is **usable (`valid: true`, exit 0)** when no ratio exceeds
-  its limit. Merges and splits are always reported as warnings and never fail
-  on their own.
+  its limit. Merges and splits are reported as warnings and never fail on
+  their own — with one carve-out: a merge that fuses text without fusing
+  time (unreadable `merge_timing` errors) fails through its own share gate.
 - `--strict` fails on any error-severity defect, ignoring the limits.
 - The measured ratios are always included in the report (`quality` block), so
   thresholds can be calibrated from real data. Each limit can be overridden
@@ -74,9 +79,11 @@ then judges the translation by how much is actually wrong:
   the target language, a verbatim copy is expected output, not a failure.
   Declare the source language with `--source-lang` (e.g. `--source-lang=bg`
   with `-l bg`); for non-Latin targets the validator also infers this from
-  the source script automatically (Cyrillic source, `bg` target). A
-  `same_language_passthrough` warning is emitted and the verbatim gates are
-  skipped.
+  the source script automatically (Cyrillic source, `bg` target); and for
+  undeclared Latin pairs a full-copy translation whose copy corpus itself
+  detects as the target language proves the same thing (errors #23/#39 -
+  a `source_already_in_target_language` warning is emitted instead).
+  Either way the verbatim gates are skipped.
 - **Source vs. model**: the translation is the artefact under review, so
   format failures in the translation fail the job. A malformed *source* is
   the user's input, not the model's failure: it is reported as a
@@ -783,6 +790,14 @@ comma or dot milliseconds, sequence numbers on their own or the timing line,
 un-numbered cues, `X1:Y1` coordinate extensions, BOM and CRLF/CR line
 endings, and for WebVTT: cue identifiers/settings, `NOTE`, `STYLE`, `REGION`
 blocks and negative timestamps.
+
+It also inspects `warnings` (non-fatal observations): `index_fused_into_text`
+fires when a cue's last text line ends with digits glued without a space, a
+bare timing line follows, and the digits equal the next cue's declared
+sequence number - a lost line break fused the text and the following cue
+index (production error #38; the shape stays format-valid, but every
+translation engine trips on it). The check is deliberately strict so text
+that merely ends in numbers never triggers it.
 
 ## Readability audit from PHP
 

@@ -504,4 +504,43 @@ VTT;
         $this->assertFalse($result['valid']);
         $this->assertSame('unreadable_file', $result['errors'][0]['subtype']);
     }
+
+    public function testIndexFusedIntoTextIsFlagged(): void
+    {
+        // Production error #38 (en->sv, DeepL): a lost line break fused the
+        // cue text with the next cue's sequence number; the following block
+        // opens with a bare timing line and the digits equal the next
+        // declared number.
+        $content = "529\n00:00:01,000 --> 00:00:02,000\nYou can't take it.530\n00:00:02,100 --> 00:00:04,000\n- No stray dogs allowed.\n- This is our job.\n\n530\n00:00:04,100 --> 00:00:05,000\nAre you insane?\n";
+        $result = $this->validator->validateContent($content);
+        $this->assertTrue($result['valid'], 'The fused-index shape stays format-valid (lenient parse): ' . json_encode($result['errors']));
+        $fused = array_values(array_filter($result['warnings'], function ($w) {
+            return $w['subtype'] === 'index_fused_into_text';
+        }));
+        $this->assertCount(1, $fused, 'Exactly one index_fused_into_text warning expected');
+        $this->assertSame(3, $fused[0]['line'], 'The warning points at the fused text line');
+    }
+
+    public function testIndexFusionNotFlaggedWhenNextNumberDiffers(): void
+    {
+        $content = "529\n00:00:01,000 --> 00:00:02,000\nYou can't take it.42\n00:00:02,100 --> 00:00:04,000\n- No stray dogs allowed.\n\n530\n00:00:04,100 --> 00:00:05,000\nAre you insane?\n";
+        $result = $this->validator->validateContent($content);
+        $this->assertNotContains('index_fused_into_text', array_column($result['warnings'], 'subtype'), 'Digits differing from the next declared number are coincidental text');
+    }
+
+    public function testIndexFusionNotFlaggedWhenNumberSurvivesOnItsOwnLine(): void
+    {
+        // Blank-separated blocks with text ending in the next cue's number:
+        // the number line still exists, so the digits are coincidental text.
+        $content = "1\n00:00:01,000 --> 00:00:02,000\nChannel2\n\n2\n00:00:02,100 --> 00:00:04,000\nSecond cue.\n";
+        $result = $this->validator->validateContent($content);
+        $this->assertNotContains('index_fused_into_text', array_column($result['warnings'], 'subtype'), 'A surviving standalone number line disambiguates the shape');
+    }
+
+    public function testIndexFusionNotFlaggedForSpacedDigits(): void
+    {
+        $content = "1\n00:00:01,000 --> 00:00:02,000\nI count to 2\n00:00:02,100 --> 00:00:04,000\n- Next block text.\n\n2\n00:00:04,100 --> 00:00:05,000\nThird cue.\n";
+        $result = $this->validator->validateContent($content);
+        $this->assertNotContains('index_fused_into_text', array_column($result['warnings'], 'subtype'), 'Digits separated by a space are ordinary text');
+    }
 }

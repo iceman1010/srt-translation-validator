@@ -62,6 +62,28 @@ final class SrtTranslationValidator
     private const DEFAULT_MAX_DRIFT_RATIO = 0.02;
     private const DEFAULT_MAX_VERBATIM_RATIO = 0.50;
     private const DEFAULT_MAX_NEAR_VERBATIM_RATIO = 0.50;
+
+    /**
+     * Merge-timing tier factor: a merged caption that misses its sources'
+     * union AND needs more than this multiple of the profile cps limit is
+     * error severity (manufactured unreadability - the engine fused text
+     * without fusing time). Below it the union violation is a warning:
+     * timing sloppiness that is still readable. Calibration 2026-11-02
+     * (complaint jobs 48137/48165, en->de, deepl2): every viewer-visible
+     * backward merge ran at 1.47-5.9x the limit; nothing real sat in the
+     * 1.0-1.25x band, which therefore stays warnings.
+     */
+    private const MERGE_TIMING_ERROR_FACTOR = 1.25;
+
+    /**
+     * Verdict gate for manufactured unreadability: the share of translation
+     * captions carrying an error-tier merge_timing defect may not exceed
+     * this. 0.05% means a single such cue fails any file up to ~2000
+     * captions - one 90+ cps flash IS the customer complaint, so singles
+     * must fail - while very large files tolerate one marginal cue.
+     */
+    private const DEFAULT_MAX_MERGE_TIMING_RATIO = 0.0005;
+
     /**
      * Small foreign-script allowance: stray scientific notation (Bayer
      * designations like "Tau Ceti" -> Greek letters), math or physics
@@ -121,6 +143,7 @@ final class SrtTranslationValidator
     private float $maxVerbatimRatio = self::DEFAULT_MAX_VERBATIM_RATIO;
     private float $maxNearVerbatimRatio = self::DEFAULT_MAX_NEAR_VERBATIM_RATIO;
     private float $maxScriptRatio = self::DEFAULT_MAX_SCRIPT_RATIO;
+    private float $maxMergeTimingRatio = self::DEFAULT_MAX_MERGE_TIMING_RATIO;
     /** Explicit merge tolerance override; null = derive it from the language pair. */
     private ?float $mergeRatioOverride = null;
     /** null = no error-count gate (ratio thresholds decide alone). */
@@ -143,6 +166,7 @@ final class SrtTranslationValidator
         'timestamp_mismatch' => ['timestamp_drift'],
         'reading_speed' => ['pacing_error_share', 'pacing_over_limit_share'],
         'unexpected_script' => ['unexpected_script'],
+        'merge_timing' => ['merge_timing'],
     ];
 
     /**
@@ -293,6 +317,23 @@ final class SrtTranslationValidator
             return $this->buildResult($defects);
         }
 
+        // Error #38 class visibility: a valid source may still carry the
+        // index-fusion corruption (cue text fused with the next cue's
+        // sequence number). The translation survived it this time, but the
+        // fragile shape is recorded for intake and tooling.
+        foreach (($originalFormat['warnings'] ?? []) as $sourceWarning) {
+            if (($sourceWarning['subtype'] ?? '') === 'index_fused_into_text') {
+                $defects[] = [
+                    'type' => 'source_timing_fusion',
+                    'severity' => 'warning',
+                    'message' => sprintf(
+                        "Source line %d: cue text is fused with the next cue's sequence number (missing line break) - source-side corruption, inspect the translation around this cue",
+                        (int) $sourceWarning['line']
+                    ),
+                ];
+            }
+        }
+
         // Compare on cue structure regardless of the container type.
         if ($originalFormat['format'] !== $translationFormat['format']) {
             $defects[] = [
@@ -332,8 +373,10 @@ final class SrtTranslationValidator
         $defects = array_merge($defects, $alignmentDefects, $partial['defects']);
 
         // Same-language passthrough: when the source is already in the
-        // target language (declared via --source-lang, or evident from its
-        // script), a verbatim copy is expected output, not a failure.
+        // target language (declared via --source-lang, evident from its
+        // script, or - for undeclared Latin pairs - proven by the copy
+        // corpus itself), a verbatim copy is expected output, not a
+        // failure. The job was wrong input, not a bad translation.
         $passthrough = $this->isSameLanguagePassthrough($originalBlocks, $expectedLanguage);
         if ($passthrough) {
             $defects[] = [
@@ -341,6 +384,32 @@ final class SrtTranslationValidator
                 'severity' => 'warning',
                 'message' => 'Source file is already written in the target language; '
                     . 'verbatim/untranslated gates skipped (same-language passthrough)',
+            ];
+        } elseif (!empty($stats['copy_corpus_target'])
+            && $stats['copy_pairs_excluded'] === 0
+            && $stats['compared_pairs'] > 0
+            && $stats['copy_pairs'] / $stats['compared_pairs'] >= 0.5) {
+            // Production errors #23/#39 class: nothing was declared, the
+            // script cannot tell Latin pairs apart, but the copy corpus
+            // itself determinately detects as the target language and no
+            // real translation work exists anywhere in the file
+            // (copy_pairs_excluded stayed 0). The request was
+            // same-language all along - wrong input, not a model failure -
+            // so the copy gates are skipped and the file passes with the
+            // attribution below. A genuine untranslated copy (source
+            // language != target) keeps its corpus verdict of false and
+            // still fails; an indeterminate corpus changes nothing.
+            $passthrough = true;
+            $defects[] = [
+                'type' => 'source_already_in_target_language',
+                'severity' => 'warning',
+                'message' => sprintf(
+                    '%d of %d aligned captions are verbatim copies and their text detects as the target language (%s) - the source file was already in the target language (degenerate same-language request); wrong input, not a model failure, so the copy gates are skipped',
+                    $stats['copy_pairs'],
+                    $stats['compared_pairs'],
+                    $expectedLanguage
+                ),
+                'copy_pairs' => $stats['copy_pairs'],
             ];
         }
 
@@ -358,24 +427,6 @@ final class SrtTranslationValidator
                     $expectedLanguage
                 ),
                 'copy_pairs_excluded' => $stats['copy_pairs_excluded'],
-            ];
-        } elseif (!$passthrough
-            && !empty($stats['copy_corpus_target'])
-            && $stats['compared_pairs'] > 0
-            && $stats['copy_pairs'] / $stats['compared_pairs'] >= 0.5) {
-            // Error #23 class: the "translation" is a copy of a source that
-            // is itself already in the target language. The copy gate keeps
-            // failing it, but the real message is the language mismatch.
-            $defects[] = [
-                'type' => 'source_already_in_target_language',
-                'severity' => 'warning',
-                'message' => sprintf(
-                    '%d of %d aligned captions are copies, and their text detects as the target language (%s) - the source file may already be in the target language',
-                    $stats['copy_pairs'],
-                    $stats['compared_pairs'],
-                    $expectedLanguage
-                ),
-                'copy_pairs' => $stats['copy_pairs'],
             ];
         }
 
@@ -522,6 +573,10 @@ final class SrtTranslationValidator
                     ? round($partial['wrong_chars'] / $partial['analyzed_chars'], 4)
                     : 0.0,
                 'merged' => $stats['merge_ratio'],
+                // Share of captions with an error-tier merge_timing
+                // defect (union miss AND unreadable). Small by design:
+                // one manufactured flash IS a customer complaint.
+                'merge_timing' => round($stats['merge_timing_harm'] / $captionCount, 4),
                 'verbatim_copy' => $stats['verbatim_ratio'],
                 'near_verbatim_copy' => $stats['near_verbatim_ratio'],
                 // Advisory: share of copy pairs excluded as mixed-source
@@ -545,6 +600,7 @@ final class SrtTranslationValidator
                 'timestamp_drift' => $this->maxDriftRatio,
                 'partial_translation' => null,
                 'merged' => $mergeThreshold,
+                'merge_timing' => $this->maxMergeTimingRatio,
                 // Advisory while a passthrough: an unchanged copy is the
                 // expected output, so neither copy ratio gates anything.
                 // Small-sample mode (indeterminate corpus) raises the
@@ -800,8 +856,36 @@ final class SrtTranslationValidator
         string $originalPath,
         string $translationPath
     ): ?array {
-        // A readable, format-valid source cannot have leaked the corruption.
-        if (($sourceFormat['format'] ?? null) === null || !empty($sourceFormat['valid'])) {
+        // Error #38 class: a format-VALID source can still carry the
+        // corruption as an index_fused_into_text warning - cue text fused
+        // with the next cue's sequence number by a lost line break. Any
+        // engine translates the fused fragment and breaks its own output
+        // structure on it, so the translation's format failure is
+        // inherited structurally even though no verbatim line match can
+        // exist (the fragment arrives translated).
+        if (!empty($sourceFormat['valid'])) {
+            $fusionLines = [];
+            foreach (($sourceFormat['warnings'] ?? []) as $warning) {
+                if (($warning['subtype'] ?? '') === 'index_fused_into_text') {
+                    $fusionLines[] = (int) ($warning['line'] ?? 0);
+                }
+            }
+            if ($fusionLines === []) {
+                return null;
+            }
+            return [
+                'type' => 'source_corruption_inherited',
+                'severity' => 'warning',
+                'message' => sprintf(
+                    "source cue text is fused with the next cue's sequence number (first at source line %d) - a missing line break in the upload; the translation's format failure is inherited from the source, not a model failure - the job is still undeliverable",
+                    $fusionLines[0]
+                ),
+                'source_lines' => $fusionLines,
+            ];
+        }
+
+        // An unreadable source cannot be inspected for verbatim matches.
+        if (($sourceFormat['format'] ?? null) === null) {
             return null;
         }
 
@@ -899,7 +983,7 @@ final class SrtTranslationValidator
      * @param list<array{start: float, end: float, lines: list<string>}> $translationBlocks
      * @param string $expectedLanguage target language, for the copy-corpus
      *        mixed-source decision (see copyCorpusIsTargetLanguage())
-     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int, copy_pairs: int, copy_pairs_excluded: int, copy_corpus_target: bool|null}}
+     * @return array{0: list<array>, 1: array{source_captions: int, content_captions: int, aligned_pairs: int, loss_ratio: float, drift_ratio: float, merge_ratio: float, merge_timing_violations: int, merge_timing_harm: int, verbatim_ratio: float, near_verbatim_ratio: float, identical_pairs: int, near_verbatim_pairs: int, compared_pairs: int, copy_pairs: int, copy_pairs_excluded: int, copy_corpus_target: bool|null}}
      */
     private function alignmentDefects(array $events, array $originalBlocks, array $translationBlocks, string $expectedLanguage): array
     {
@@ -908,12 +992,18 @@ final class SrtTranslationValidator
         $driftedPairs = 0;
         $missingCaptions = 0;
         $mergedCaptions = 0;
+        $mergeTimingViolations = 0;
+        $mergeTimingHarm = 0;
         $identicalPairs = 0;
         $nearVerbatimPairs = 0;
         $comparedPairs = 0;
         // Verbatim/near-verbatim pairs are collected as texts first: whether
         // they count depends on the copy-corpus language decision below.
         $copyPairs = [];
+        // translation index -> its paired source index (match/drift). The
+        // merge branch needs the absorbing cue's own source caption to
+        // compute the union span of everything the cue carries.
+        $matchedSourceOf = [];
 
         // Normalized source text per caption, computed once: pairs whose
         // source normalizes to nothing (music cues "♪♪", "[music]", "...")
@@ -935,6 +1025,7 @@ final class SrtTranslationValidator
                     $pairs++;
                     $i = $event['source_index'];
                     $j = $event['translation_index'];
+                    $matchedSourceOf[$j] = $i;
 
                     // Verbatim-copy measurement: a pair whose translation
                     // equals the source after normalization carried no
@@ -1012,6 +1103,77 @@ final class SrtTranslationValidator
                             'translation_caption' => $event['before_translation_index'] + 1,
                             'caption_count' => count($indices)
                         ];
+
+                        // Union-span verification: a real merge fuses the
+                        // text AND the display window. When the merged cue
+                        // does not cover the union of its sources (beyond
+                        // the pairing tolerance), the engine manufactured
+                        // reading load - same text, less time. This is the
+                        // defect class behind the 2026-11 en->de deepl2
+                        // complaints (backward merges keeping the last
+                        // source's start): the union says the cue owes the
+                        // viewer seconds its timing does not deliver.
+                        // Error tier only when the resulting load exceeds
+                        // MERGE_TIMING_ERROR_FACTOR x the cps limit; a
+                        // readable-but-sloppy span stays a warning.
+                        $absorber = $event['before_translation_index'];
+                        $ownSource = $matchedSourceOf[$absorber] ?? null;
+                        $unionSources = $event['source_indices'];
+                        if ($ownSource !== null) {
+                            $unionSources[] = $ownSource;
+                        }
+                        $unionStart = PHP_FLOAT_MAX;
+                        $unionEnd = 0.0;
+                        foreach ($unionSources as $unionIndex) {
+                            $unionStart = min($unionStart, $originalBlocks[$unionIndex]['start']);
+                            $unionEnd = max($unionEnd, $originalBlocks[$unionIndex]['end']);
+                        }
+                        $mergedCue = $translationBlocks[$absorber];
+                        $deficit = max(
+                            $mergedCue['start'] - $unionStart,
+                            $unionEnd - $mergedCue['end']
+                        );
+                        if ($deficit > $this->timestampTolerance) {
+                            $mergeTimingViolations++;
+                            $chars = ReadabilityChecker::plainLength(implode(' ', $mergedCue['lines']));
+                            $duration = $mergedCue['end'] - $mergedCue['start'];
+                            $cps = $duration > 0.0 ? $chars / $duration : PHP_FLOAT_MAX;
+                            $cpsLimit = 0.0;
+                            try {
+                                $cpsLimit = ReadabilityProfile::for($expectedLanguage)['cps'];
+                            } catch (\Throwable $e) {
+                                // Unreadable profiles file: the union
+                                // violation is still real timing evidence,
+                                // but there is no cps tier to compare to.
+                            }
+                            $harm = $cpsLimit > 0.0
+                                && $cps > self::MERGE_TIMING_ERROR_FACTOR * $cpsLimit;
+                            if ($harm) {
+                                $mergeTimingHarm++;
+                            }
+                            $defects[] = [
+                                'type' => 'merge_timing',
+                                'severity' => $harm ? 'error' : 'warning',
+                                'message' => sprintf(
+                                    'Caption #%d carries merged captions #%d-%d but displays for %.1fs of their %.1fs combined span and needs %.1f cps to read (limit %.1f cps)',
+                                    $absorber + 1,
+                                    $event['source_indices'][0] + 1,
+                                    ($ownSource ?? $event['source_indices'][count($event['source_indices']) - 1]) + 1,
+                                    $duration,
+                                    $unionEnd - $unionStart,
+                                    $cps,
+                                    $cpsLimit
+                                ),
+                                'translation_caption' => $absorber + 1,
+                                'source_start_caption' => $event['source_indices'][0] + 1,
+                                'source_end_caption' => ($ownSource ?? $event['source_indices'][count($event['source_indices']) - 1]) + 1,
+                                'start_offset' => round($mergedCue['start'] - $unionStart, 3),
+                                'end_offset' => round($unionEnd - $mergedCue['end'], 3),
+                                'deficit' => round($deficit, 3),
+                                'cps' => $cps,
+                                'cps_limit' => $cpsLimit
+                            ];
+                        }
                         break;
                     }
 
@@ -1057,8 +1219,10 @@ final class SrtTranslationValidator
         // short captions). Target-dominant copy text alone is not enough:
         // the file must ALSO show real translation work elsewhere, otherwise
         // it is a source that is already entirely in the target language
-        // (production error #23: a Finnish file submitted as en->fi), and
-        // the copy gate must keep failing it. A null verdict (indeterminate
+        // (production errors #23/#39: a Finnish file submitted as en->fi,
+        // a plain fi->fi request) - which validate() then treats as a
+        // same-language passthrough (wrong input, not a model failure)
+        // instead of a copy-gate failure. A null verdict (indeterminate
         // corpus - too small to detect) is handled by the copy gates, which
         // raise their bar for near-total verbatim agreement instead.
         $excludedCopies = 0;
@@ -1093,6 +1257,8 @@ final class SrtTranslationValidator
             'loss_ratio' => $contentCaptions > 0 ? round($missingCaptions / $contentCaptions, 4) : 0.0,
             'drift_ratio' => $pairs > 0 ? round($driftedPairs / $pairs, 4) : 0.0,
             'merge_ratio' => $contentCaptions > 0 ? round($mergedCaptions / $contentCaptions, 4) : 0.0,
+            'merge_timing_violations' => $mergeTimingViolations,
+            'merge_timing_harm' => $mergeTimingHarm,
             'identical_pairs' => $identicalPairs,
             'near_verbatim_pairs' => $nearVerbatimPairs,
             'compared_pairs' => $comparedPairs,
@@ -1112,9 +1278,10 @@ final class SrtTranslationValidator
      * Primary signal: the declared source language (job request). Fallback
      * for non-Latin targets when nothing was declared: the source is
      * substantially written in the target's characteristic script (Cyrillic
-     * for bg, kana for ja, ...). Latin-written targets get no fallback --
-     * script cannot distinguish English from Dutch, and for those an
-     * unchanged copy must stay a failure (the untranslated defect).
+     * for bg, kana for ja, ...). Latin-written targets get no fallback
+     * here - script cannot distinguish English from Dutch; for those the
+     * copy-corpus evidence in validate() decides instead (see the
+     * source_already_in_target_language branch for errors #23/#39).
      *
      * @param list<array{lines: list<string>}> $sourceBlocks
      */

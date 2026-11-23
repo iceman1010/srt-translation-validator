@@ -296,6 +296,8 @@ final class SubtitleFormatValidator
 
         $this->flushSrtCue($cueCount, $inCue, $broken, $cueTextLines, $timingLine, $pendingNumber, $pendingNumberLine, $lastNumber, $warnings);
 
+        $this->detectSrtIndexFusion($lines, $warnings);
+
         return $cueCount;
     }
 
@@ -347,6 +349,76 @@ final class SubtitleFormatValidator
         $timingLine = null;
         $pendingNumber = null;
         $pendingNumberLine = null;
+    }
+
+    /**
+     * Post-pass for the error #38 corruption class: a lost line break
+     * fuses a cue's last text line with the next cue's sequence number
+     * ("You can't take it.530"), so the following block opens with a
+     * bare timing line and its index never appears on its own line. The
+     * state machine above accepts this shape (blank lines between blocks
+     * are an optional variant), so it is detected here by signature:
+     * trailing digits glued to the text, a bare timing line immediately
+     * after, and digits equal to the next declared sequence number.
+     * Anything less specific would false-positive on legitimate text
+     * that happens to end in numbers.
+     */
+    private function detectSrtIndexFusion(array $lines, array &$warnings): void
+    {
+        $n = count($lines);
+        for ($i = 0; $i < $n; $i++) {
+            $line = trim($lines[$i]);
+            if ($line === '' || $this->containsArrow($line) || preg_match('/^\d+$/', $line)) {
+                continue;
+            }
+            if (!preg_match('/(?<!\s)(\d+)$/', $line, $m)) {
+                continue;
+            }
+            $digits = (int) $m[1];
+
+            // The eaten-index shape: the next non-blank line is the
+            // following cue's BARE timing line (its number is stuck on
+            // the text). A timing line that still carries its own number
+            // prefix means the index survived - not this corruption.
+            $j = $this->nextNonEmptyIndex($lines, $i);
+            if ($j === null || !$this->containsArrow($lines[$j])) {
+                continue;
+            }
+            if (!preg_match(self::SRT_TIMING_RE, trim($lines[$j]), $timingMatch) || !empty($timingMatch['num'])) {
+                continue;
+            }
+
+            // Corroborate: the fused digits must equal the next cue's
+            // declared sequence number (standalone number line, or a
+            // same-line number prefix on a later timing line).
+            for ($k = $j + 1; $k < $n; $k++) {
+                $candidate = trim($lines[$k]);
+                if ($candidate === '') {
+                    continue;
+                }
+                $declared = null;
+                if (preg_match('/^\d+$/', $candidate)) {
+                    $after = $this->nextNonEmptyIndex($lines, $k);
+                    if ($after !== null && $this->containsArrow($lines[$after])) {
+                        $declared = (int) $candidate;
+                    }
+                } elseif ($this->containsArrow($lines[$k])
+                    && preg_match(self::SRT_TIMING_RE, $candidate, $numbered)
+                    && !empty($numbered['num'])) {
+                    $declared = (int) $numbered['num'];
+                }
+                if ($declared !== null) {
+                    if ($declared === $digits) {
+                        $warnings[] = [
+                            'line' => $i + 1,
+                            'subtype' => 'index_fused_into_text',
+                            'message' => "Line " . ($i + 1) . ": cue text ends with sequence number {$digits} of the next cue - a missing line break fused the text and the following cue index"
+                        ];
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     /**

@@ -364,4 +364,52 @@ class SrtTranslationValidatorTest extends TestCase
         $this->assertContains('malformed_timestamp', $subtypes, 'Should detect a malformed timestamp line');
         $this->assertSame(['missing_timestamp', 'missing_timestamp', 'missing_timestamp', 'malformed_timestamp', 'malformed_timestamp'], $subtypes, 'Should pinpoint each individual format error');
     }
+
+    public function testFusedIndexSourceAttributesInheritedCorruption(): void
+    {
+        // Production error #38 class (en->sv, DeepL): the source's cue text
+        // is fused with the next cue's index by a lost line break; the engine
+        // translates the fused fragment and its output fails the format
+        // gate. The failure must be attributed to the source, not the model.
+        $source = $this->examplesDir . 'tmp_fusion_src.srt';
+        $translation = $this->examplesDir . 'tmp_fusion_tgt.srt';
+        file_put_contents($source, "529\n00:00:01,000 --> 00:00:02,000\nYou can't take it.530\n00:00:02,100 --> 00:00:04,000\n- No stray dogs allowed.\n- This is our job.\n\n530\n00:00:04,100 --> 00:00:05,000\nAre you insane?\n");
+        file_put_contents($translation, "529\n00:00:01,000 --> 00:00:02,000\nDu klarar inte av det.530 00:00:02,100 --> \n- Inga herrel\xC3\xB6sa hundar.\n\n530\n00:00:04,100 --> 00:00:05,000\n\xC3\x84r du galen?\n");
+        try {
+            $result = $this->validator->validate($source, $translation, 'sv');
+
+            $this->assertFalse($result['valid'], 'The mangled translation must stay undeliverable');
+            $types = array_column($result['defects'], 'type');
+            $this->assertContains('invalid_format', $types);
+            $this->assertContains('source_corruption_inherited', $types, '#38 class: the format failure must be attributed to the fused source');
+            $inherited = array_values(array_filter($result['defects'], function ($d) {
+                return $d['type'] === 'source_corruption_inherited';
+            }))[0];
+            $this->assertSame('warning', $inherited['severity'], 'The attribution is informational: the error already fails the file');
+        } finally {
+            @unlink($source);
+            @unlink($translation);
+        }
+    }
+
+    public function testFusedIndexSourceWithCleanTranslationStaysUsableButWarns(): void
+    {
+        // Same fused source, but the translation survived it: the verdict
+        // must not fail on the source's shape, yet the fragile shape has
+        // to stay visible for intake and tooling.
+        $source = $this->examplesDir . 'tmp_fusion_src2.srt';
+        $translation = $this->examplesDir . 'tmp_fusion_tgt2.srt';
+        file_put_contents($source, "529\n00:00:01,000 --> 00:00:02,000\nYou can't take it.530\n00:00:02,100 --> 00:00:04,000\n- No stray dogs allowed.\n- This is our job.\n\n530\n00:00:04,100 --> 00:00:05,000\nAre you insane?\n");
+        file_put_contents($translation, "529\n00:00:01,000 --> 00:00:02,000\nDu klarar inte av det.\n\n530\n00:00:02,100 --> 00:00:04,000\n- Inga herrel\xC3\xB6sa hundar.\n- Det h\xC3\xA4r \xC3\xA4r v\xC3\xA5rt jobb.\n\n530\n00:00:04,100 --> 00:00:05,000\n\xC3\x84r du galen?\n");
+        try {
+            $result = $this->validator->validate($source, $translation, 'sv');
+
+            $this->assertTrue($result['valid'], 'A clean translation of a fused source stays usable: ' . json_encode(array_column($result['defects'], 'type')));
+            $types = array_column($result['defects'], 'type');
+            $this->assertContains('source_timing_fusion', $types, 'The fragile source shape must be surfaced');
+        } finally {
+            @unlink($source);
+            @unlink($translation);
+        }
+    }
 }

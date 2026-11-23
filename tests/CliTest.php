@@ -138,6 +138,32 @@ class CliTest extends TestCase
         }
     }
 
+    public function testUndeclaredSameLanguageCopyPassesOnCorpusEvidence(): void
+    {
+        // Production errors #23/#39 class: a large Finnish file submitted as
+        // fi->fi with nothing declared. The copy corpus itself detects as the
+        // target language, so the request was same-language all along - wrong
+        // input, not a model failure - and the CLI passes it with the
+        // attribution warning (exit 0) instead of an untranslated-copy error.
+        $lines = [];
+        for ($i = 1; $i <= 120; $i++) {
+            $start = 4 * ($i - 1);
+            $lines[] = $i . "\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($start + 3))
+                . "\nTämä on suomenkielinen lause numero $i, jossa on riittävästi sanoja kielentunnistukseen.\n";
+        }
+        $copy = $this->tmp . '/fi-copy.srt';
+        file_put_contents($copy, implode("\n", $lines));
+        try {
+            [$exitCode, $output] = $this->execute([$copy, $copy, '-l', 'fi']);
+            $this->assertSame(0, $exitCode, 'A same-language full copy passes on copy-corpus evidence');
+            $this->assertStringContainsString('SOURCE ALREADY IN TARGET LANGUAGE', $output);
+            $this->assertStringNotContainsString('UNTRANSLATED COPY', $output);
+            $this->assertStringContainsString('RESULT: PASSED', $output);
+        } finally {
+            @unlink($copy);
+        }
+    }
+
     public function testHelp(): void
     {
         [$exit, $output] = $this->execute(['--help']);

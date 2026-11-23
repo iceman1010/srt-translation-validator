@@ -410,9 +410,11 @@ class ValidatorGatesTest extends TestCase
 
         $result = $this->validator->validate($source, $translation, 'ja');
 
+        // array_values: merge_timing defects may interleave with the
+        // merged_captions ones; key gaps would fail the identical check.
         $messages = array_map(
             fn (array $d): string => $d['message'],
-            array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'merged_captions')
+            array_values(array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'merged_captions'))
         );
         $this->assertSame([
             'Original caption #4 is merged into translation caption #4',
@@ -470,6 +472,107 @@ class ValidatorGatesTest extends TestCase
         $this->assertNull($result['quality']['thresholds']['merged']);
     }
 
+    public function testBackwardMergeMissingTheUnionFailsWhenUnreadable(): void
+    {
+        // The 2026-11 complaint class (en->de, deepl2, jobs 48137/48165):
+        // DeepL fuses three sources into the cue keeping the LAST source's
+        // timing - it starts 4s after the sources' union and needs 3x the
+        // cps limit. The union miss plus manufactured reading load must
+        // fail the file, not just warn.
+        $source = $this->writeSrt('source.en.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, 'English dialogue line number ' . ($i + 1) . ' with some words'],
+            range(0, 5)
+        ));
+        // Translation caption #2 [6-8] keeps source #4's timing while
+        // carrying #2-#4: union [2-8] missed by 4s at the start.
+        $translation = $this->writeSrt('translation.de.srt', [
+            [0, 2, 'Deutsche Dialogzeile Nummer eins mit einigen Woertern'],
+            [6, 8, 'Dies ist eine deutlich laengere deutsche Dialogzeile, die drei urspruengliche Untertitelzeilen zu einer einzigen Caption zusammenfasst und dadurch viel zu schnell zu lesen ist'],
+            [8, 10, 'Deutsche Dialogzeile Nummer fuenf mit einigen Woertern'],
+            [10, 12, 'Deutsche Dialogzeile Nummer sechs mit einigen Woertern'],
+        ]);
+
+        $result = $this->validator->validate($source, $translation, 'de');
+
+        $this->assertFalse($result['valid']);
+        $this->assertContains('merge_timing', $result['quality']['failed_gates']);
+        $this->assertSame(0.25, $result['quality']['ratios']['merge_timing']);
+        $this->assertSame(0.0005, $result['quality']['thresholds']['merge_timing']);
+
+        $mergeTiming = array_values(array_filter(
+            $result['defects'],
+            fn (array $d): bool => $d['type'] === 'merge_timing'
+        ));
+        $this->assertCount(1, $mergeTiming);
+        $this->assertSame('error', $mergeTiming[0]['severity']);
+        $this->assertSame(2, $mergeTiming[0]['translation_caption']);
+        $this->assertSame(2, $mergeTiming[0]['source_start_caption']);
+        $this->assertSame(4, $mergeTiming[0]['source_end_caption']);
+        $this->assertSame(4.0, $mergeTiming[0]['start_offset']);
+        $this->assertSame(0.0, $mergeTiming[0]['end_offset']);
+        $this->assertGreaterThan($mergeTiming[0]['cps_limit'], $mergeTiming[0]['cps']);
+    }
+
+    public function testBackwardMergeMissingTheUnionStaysAWarningWhenReadable(): void
+    {
+        // Same union miss, but the merged text stays readable: timing
+        // sloppiness in the gray band is reported, never fatal. Some
+        // mergers are okay - only manufactured unreadability gates.
+        $source = $this->writeSrt('source.en.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, 'English dialogue line number ' . ($i + 1) . ' with some words'],
+            range(0, 5)
+        ));
+        $translation = $this->writeSrt('translation.de.srt', [
+            [0, 2, 'Deutsche Dialogzeile Nummer eins mit einigen Woertern'],
+            [6, 8, 'Kurze deutsche Zeile'],
+            [8, 10, 'Deutsche Dialogzeile Nummer fuenf mit einigen Woertern'],
+            [10, 12, 'Deutsche Dialogzeile Nummer sechs mit einigen Woertern'],
+        ]);
+
+        $result = $this->validator->validate($source, $translation, 'de');
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame([], $result['quality']['failed_gates']);
+        $this->assertSame(0.0, $result['quality']['ratios']['merge_timing']);
+        $this->assertSame(0.0005, $result['quality']['thresholds']['merge_timing']);
+
+        $mergeTiming = array_values(array_filter(
+            $result['defects'],
+            fn (array $d): bool => $d['type'] === 'merge_timing'
+        ));
+        $this->assertCount(1, $mergeTiming);
+        $this->assertSame('warning', $mergeTiming[0]['severity']);
+    }
+
+    public function testSingleUnreadableMergeIsToleratedInVeryLargeFiles(): void
+    {
+        // Threshold semantics: 0.05% lets one marginal cue pass in files
+        // of ~2500 captions while a single cue still fails normal files
+        // (the complaint jobs carry 1-14 such cues in 1100-2000 cues).
+        $source = $this->writeSrt('source.en.srt', array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, 'English dialogue line number ' . ($i + 1) . ' with some words'],
+            range(0, 2499)
+        ));
+        $captions = array_map(
+            fn (int $i): array => [$i * 2, $i * 2 + 2, 'Deutsche Dialogzeile Nummer ' . ($i + 1) . ' mit einigen Woertern'],
+            array_values(array_filter(range(0, 2499), fn (int $i): bool => !in_array($i, [10, 11, 12], true)))
+        );
+        // Splice the fused cue (sources #11-#13, keeps #13's timing) in
+        // at its chronological position.
+        array_splice($captions, 10, 0, [[24, 26, 'Dies ist eine deutlich laengere deutsche Dialogzeile, die drei urspruengliche Untertitelzeilen zu einer einzigen Caption zusammenfasst und dadurch viel zu schnell zu lesen ist']]);
+        $translation = $this->writeSrt('translation.de.srt', $captions);
+
+        $result = $this->validator->validate($source, $translation, 'de');
+
+        $this->assertTrue($result['valid']);
+        $this->assertSame(0.0004, $result['quality']['ratios']['merge_timing']);
+        $errors = array_filter(
+            $result['defects'],
+            fn (array $d): bool => $d['type'] === 'merge_timing' && $d['severity'] === 'error'
+        );
+        $this->assertCount(1, $errors, 'The error-tier defect stays visible even when the ratio tolerates it');
+    }
+
     public function testVerboseTargetMergingIsAdvisory(): void
     {
         // ja -> en, production error #6 pattern (2026-09-21): short Japanese
@@ -525,13 +628,15 @@ class ValidatorGatesTest extends TestCase
         );
     }
 
-    public function testSourceAlreadyInTargetLanguageStillFails(): void
+    public function testSourceAlreadyInTargetLanguagePassesWithAttribution(): void
     {
-        // Production error #23 pattern: a Finnish file submitted into an
-        // en->fi job - the "translation" is a copy of a source that is
-        // already in the target language, with NO real translation work
-        // anywhere. The mixed-source exemption must not apply, and the
-        // language mismatch gets its own warning.
+        // Production errors #23/#39 pattern: a Finnish file submitted into
+        // an en->fi (or plain fi->fi) job - the "translation" is a copy of
+        // a source that is already in the target language, with NO real
+        // translation work anywhere. The mixed-source exemption must not
+        // apply (there is no work), but this is wrong input, not a model
+        // failure: the copy gates are skipped, the file passes, and the
+        // language mismatch gets its own attribution warning.
         $cues = [];
         for ($i = 0; $i < 60; $i++) {
             $start = $i * 6.0;
@@ -542,11 +647,36 @@ class ValidatorGatesTest extends TestCase
 
         $result = $this->validator->validate($source, $translation, 'fi');
 
-        $this->assertFalse($result['valid'], 'A file that is already in the target language did no translation work');
+        $this->assertTrue($result['valid'], 'A same-language request is wrong input, not a model failure');
         $this->assertNotEmpty(
             array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'source_already_in_target_language'),
             'The language mismatch must be reported explicitly'
         );
+        $this->assertCount(0, array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'untranslated_copy'), 'The copy gate must stay skipped');
+        $this->assertNull($result['quality']['thresholds']['verbatim_copy'], 'The verbatim ratio is advisory while a passthrough');
+    }
+
+    public function testUndeclaredCopyInSourceLanguageStillFails(): void
+    {
+        // The control that keeps the #23/#39 flip honest: a realistic-size
+        // wholesale copy whose text stays in the SOURCE language is a real
+        // model failure (the Gemini wholesale-passthrough class) - the
+        // corpus verdict comes back false, no passthrough fires, and the
+        // copy gate keeps failing it.
+        $cues = [];
+        for ($i = 0; $i < 150; $i++) {
+            $start = $i * 2.0;
+            $cues[] = [$start, $start + 1.9, "I do not know what happened last night, but he said we would be home late number $i"];
+        }
+        $source = $this->writeSrt('en-source.srt', $cues);
+        $copy = $this->writeSrt('en-copy.srt', $cues);
+
+        $result = $this->validator->validate($source, $copy, 'de');
+
+        $this->assertFalse($result['valid'], 'A wholesale untranslated copy into another language must keep failing');
+        $this->assertNotEmpty(array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'untranslated_copy'));
+        $this->assertCount(0, array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'source_already_in_target_language'), 'English copy text is not the German target: no same-language attribution');
+        $this->assertCount(0, array_filter($result['defects'], fn (array $d): bool => $d['type'] === 'same_language_passthrough'));
     }
 
     public function testExplicitMergeRatioReactivatesTheGate(): void
