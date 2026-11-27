@@ -839,7 +839,9 @@ final class SrtTranslationValidator
      * lines. Only a verbatim match attributes the corruption to the source;
      * the same orphan shape with a clean source stays a model-side failure
      * (error #28, hu->sl, target-language fragment without a source
-     * counterpart).
+     * counterpart). A format-VALID source is not automatically clean: two
+     * more signatures attribute structurally - the index fusion of error
+     * #38 and the empty-cue split of error #42 (see the branches below).
      *
      * Emits a warning (never an error): the invalid_format error already
      * fails the undeliverable file, and the verdict must not punish the
@@ -870,18 +872,20 @@ final class SrtTranslationValidator
                     $fusionLines[] = (int) ($warning['line'] ?? 0);
                 }
             }
-            if ($fusionLines === []) {
-                return null;
+            if ($fusionLines !== []) {
+                return [
+                    'type' => 'source_corruption_inherited',
+                    'severity' => 'warning',
+                    'message' => sprintf(
+                        "source cue text is fused with the next cue's sequence number (first at source line %d) - a missing line break in the upload; the translation's format failure is inherited from the source, not a model failure - the job is still undeliverable",
+                        $fusionLines[0]
+                    ),
+                    'source_lines' => $fusionLines,
+                ];
             }
-            return [
-                'type' => 'source_corruption_inherited',
-                'severity' => 'warning',
-                'message' => sprintf(
-                    "source cue text is fused with the next cue's sequence number (first at source line %d) - a missing line break in the upload; the translation's format failure is inherited from the source, not a model failure - the job is still undeliverable",
-                    $fusionLines[0]
-                ),
-                'source_lines' => $fusionLines,
-            ];
+            // No fusion either: a format-valid source can still carry the
+            // third signature - empty, text-less cues (error #42 class).
+            return $this->emptyCueSplitDefect($sourceFormat, $translationFormat, $originalPath, $translationPath);
         }
 
         // An unreadable source cannot be inspected for verbatim matches.
@@ -936,6 +940,132 @@ final class SrtTranslationValidator
             ),
             'translation_lines' => $matchedTranslationLines,
             'source_lines' => $matchedSourceLines,
+        ];
+    }
+
+    /**
+     * Error #42 class (found 2026-11-27, uk->es): a format-VALID source can
+     * carry empty, text-less cues - timing-only blocks, each reported by the
+     * format validator as an empty_cue warning. Engines merge the cues
+     * around an empty one, and that merge can leave a whitespace-only line
+     * in the middle of the output cue's text block; the parser ends the cue
+     * there and the following translated lines orphan (missing_timestamp).
+     * No verbatim match can exist - the corrupting line is whitespace and
+     * the source defect is an absence - so the attribution correlates
+     * structurally: a whitespace-split orphan in the translation must sit
+     * in the merge window of an empty source cue (its start within +/- 2
+     * seconds of the split cue's timing). A truly empty separator line is
+     * NOT this shape (plain stray text, errors #28/#35), and the same split
+     * over a source without a nearby empty cue stays model-side.
+     *
+     * Emits the same source_corruption_inherited warning as the other
+     * inheritance branches: the invalid_format error already fails the
+     * undeliverable file, the warning only records who owns it.
+     *
+     * @param array{format: string|null, valid: bool, errors: list<array{line: int, subtype: string, message: string}>, warnings?: list<array{line: int, subtype: string, message: string}>} $sourceFormat
+     * @param array{format: string|null, valid: bool, errors: list<array{line: int, subtype: string, message: string}>} $translationFormat
+     * @return array<string, mixed>|null the source_corruption_inherited defect, or null when the corruption is not provably inherited
+     */
+    private function emptyCueSplitDefect(
+        array $sourceFormat,
+        array $translationFormat,
+        string $originalPath,
+        string $translationPath
+    ): ?array {
+        $translationLines = @file($translationPath, FILE_IGNORE_NEW_LINES);
+        $sourceLines = @file($originalPath, FILE_IGNORE_NEW_LINES);
+        if ($translationLines === false || $sourceLines === false) {
+            return null;
+        }
+
+        // The empty_cue warnings carry the block's starting line - its
+        // timing line - so the merge window comes straight from the source.
+        $emptyCues = [];
+        foreach (($sourceFormat['warnings'] ?? []) as $warning) {
+            if (($warning['subtype'] ?? '') !== 'empty_cue') {
+                continue;
+            }
+            $lineNumber = (int) ($warning['line'] ?? 0);
+            $interval = $this->timingLineSeconds($sourceLines[$lineNumber - 1] ?? '');
+            if ($interval !== null) {
+                $emptyCues[] = ['line' => $lineNumber, 'interval' => $interval];
+            }
+        }
+        if ($emptyCues === []) {
+            return null;
+        }
+
+        $matchedTranslationLines = [];
+        $matchedSourceLines = [];
+        foreach (($translationFormat['errors'] ?? []) as $error) {
+            if (!in_array($error['subtype'] ?? '', ['missing_timestamp', 'stray_text'], true)) {
+                continue;
+            }
+            $orphanLine = (int) ($error['line'] ?? 0);
+            // The split: the line above the orphan is whitespace-only - not
+            // a true cue separator, a text block torn in two by stray spaces.
+            $previous = $translationLines[$orphanLine - 2] ?? null;
+            if ($previous === null || preg_match('/^[ \t]+\r?$/', $previous) !== 1) {
+                continue;
+            }
+            // The split cue's own timing line sits above its text lines;
+            // a blank line before one means the shape is not ours.
+            $timingLine = null;
+            for ($k = $orphanLine - 3; $k >= 0; $k--) {
+                $candidate = $translationLines[$k];
+                if (trim($candidate) === '') {
+                    break;
+                }
+                if (strpos($candidate, '-->') !== false) {
+                    $timingLine = $candidate;
+                    break;
+                }
+            }
+            $interval = $timingLine === null ? null : $this->timingLineSeconds($timingLine);
+            if ($interval === null) {
+                continue;
+            }
+            foreach ($emptyCues as $cue) {
+                if ($cue['interval'][0] >= $interval[0] - 2.0 && $cue['interval'][0] <= $interval[1] + 2.0) {
+                    $matchedTranslationLines[] = $orphanLine;
+                    $matchedSourceLines[] = $cue['line'];
+                    break;
+                }
+            }
+        }
+
+        if ($matchedTranslationLines === []) {
+            return null;
+        }
+
+        return [
+            'type' => 'source_corruption_inherited',
+            'severity' => 'warning',
+            'message' => sprintf(
+                '%d orphan line(s) in the translation follow a whitespace-only line that splits a cue in two, and the source has an empty, text-less cue at that same spot (first at source line %d): the engine merged around the empty cue and its output structure broke - inherited from the source, not a model failure - the job is still undeliverable',
+                count($matchedTranslationLines),
+                $matchedSourceLines[0] ?? 0
+            ),
+            'translation_lines' => array_values(array_unique($matchedTranslationLines)),
+            'source_lines' => array_values(array_unique($matchedSourceLines)),
+        ];
+    }
+
+    /**
+     * @param string $line a raw SRT/WebVTT timing line
+     * @return array{float, float}|null [start, end] in seconds, null when the line is not a timing line
+     */
+    private function timingLineSeconds(string $line): ?array
+    {
+        if (!preg_match('/(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})/', $line, $m)) {
+            return null;
+        }
+        $seconds = static function (string $h, string $i, string $s, string $ms): float {
+            return ((int) $h) * 3600 + ((int) $i) * 60 + ((int) $s) + ((int) str_pad($ms, 3, '0')) / 1000;
+        };
+        return [
+            $seconds($m[1], $m[2], $m[3], $m[4]),
+            $seconds($m[5], $m[6], $m[7], $m[8]),
         ];
     }
 

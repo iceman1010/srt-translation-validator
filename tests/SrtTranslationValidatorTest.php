@@ -412,4 +412,78 @@ class SrtTranslationValidatorTest extends TestCase
             @unlink($translation);
         }
     }
+
+    public function testEmptyCueSourceAttributesWhitespaceSplitTranslation(): void
+    {
+        // Production error #42 class (uk->es, DeepL): the source carries an
+        // empty, text-less cue; the engine merges the cues around it and the
+        // merge leaves a whitespace-only line mid-block in the output. The
+        // parser ends the cue there and the following translated lines
+        // orphan - invalid_format, but the corruption descends from the
+        // source's empty cue, not the model. (Translation uses CRLF like the
+        // real #42 file; the whitespace line is a single space + CR.)
+        $source = $this->examplesDir . 'tmp_emptycue_src.srt';
+        $translation = $this->examplesDir . 'tmp_emptycue_tgt.srt';
+        file_put_contents($source, "1\n00:00:01,000 --> 00:00:02,000\nFirst line of text.\n\n2\n00:00:02,100 --> 00:00:03,500\n\n3\n00:00:03,600 --> 00:00:05,000\nThird cue text here.\n");
+        file_put_contents($translation, "1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated third\r\n\r\n3\r\n00:00:03,600 --> 00:00:05,000\r\ntercera traducida\r\n");
+        try {
+            $result = $this->validator->validate($source, $translation, 'es');
+
+            $this->assertFalse($result['valid'], 'The split translation must stay undeliverable');
+            $types = array_column($result['defects'], 'type');
+            $this->assertContains('invalid_format', $types);
+            $this->assertContains('source_corruption_inherited', $types, '#42 class: the whitespace-split failure must be attributed to the empty source cue');
+            $inherited = array_values(array_filter($result['defects'], function ($d) {
+                return $d['type'] === 'source_corruption_inherited';
+            }))[0];
+            $this->assertSame('warning', $inherited['severity'], 'The attribution is informational: the error already fails the file');
+        } finally {
+            @unlink($source);
+            @unlink($translation);
+        }
+    }
+
+    public function testWhitespaceSplitOverCleanSourceStaysModelSide(): void
+    {
+        // Error #35 class control: the same whitespace-split translation,
+        // but the source has no empty cue at the split's timing - the model
+        // wrote the stray line itself. No attribution.
+        $source = $this->examplesDir . 'tmp_splitclean_src.srt';
+        $translation = $this->examplesDir . 'tmp_splitclean_tgt.srt';
+        file_put_contents($source, "1\n00:00:01,000 --> 00:00:02,000\nFirst line of text.\n\n2\n00:00:02,100 --> 00:00:03,500\nSecond cue text.\n\n3\n00:00:03,600 --> 00:00:05,000\nThird cue text here.\n");
+        file_put_contents($translation, "1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated third\r\n\r\n3\r\n00:00:03,600 --> 00:00:05,000\r\ntercera traducida\r\n");
+        try {
+            $result = $this->validator->validate($source, $translation, 'es');
+
+            $this->assertFalse($result['valid'], 'The split translation still fails');
+            $types = array_column($result['defects'], 'type');
+            $this->assertContains('invalid_format', $types);
+            $this->assertNotContains('source_corruption_inherited', $types, 'A clean source must not absorb the model\'s whitespace bug');
+        } finally {
+            @unlink($source);
+            @unlink($translation);
+        }
+    }
+
+    public function testEmptyCueFarFromTheSplitStaysModelSide(): void
+    {
+        // Correlation control: the source has an empty cue, but nowhere near
+        // the whitespace split (here two hours away) - coincidence, not
+        // inheritance. No attribution.
+        $source = $this->examplesDir . 'tmp_emptycue_far_src.srt';
+        $translation = $this->examplesDir . 'tmp_emptycue_far_tgt.srt';
+        file_put_contents($source, "1\n00:00:01,000 --> 00:00:02,000\nFirst line of text.\n\n2\n01:59:02,100 --> 01:59:03,500\n\n3\n01:59:03,600 --> 01:59:05,000\nThird cue text here.\n");
+        file_put_contents($translation, "1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated third\r\n\r\n3\r\n00:00:03,600 --> 00:00:05,000\r\ntercera traducida\r\n");
+        try {
+            $result = $this->validator->validate($source, $translation, 'es');
+
+            $this->assertFalse($result['valid'], 'The split translation still fails');
+            $types = array_column($result['defects'], 'type');
+            $this->assertContains('invalid_format', $types);
+            $this->assertNotContains('source_corruption_inherited', $types, 'An unrelated distant empty cue must not absorb the model\'s whitespace bug');
+        } finally {
+            @unlink($source);
+            @unlink($translation);
+        }
+    }
 }
