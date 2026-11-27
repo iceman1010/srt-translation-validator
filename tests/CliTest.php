@@ -549,4 +549,46 @@ class CliTest extends TestCase
         $this->assertStringContainsString('[critical]', $output);
         $this->assertStringContainsString('critical - reading speed', $output);
     }
+
+    public function testReadabilityFlagsStructurallyInvalidFile(): void
+    {
+        // Production error #42 (uk->es): a file whose readability audit
+        // looks like harmless length warnings while the file itself is
+        // structurally broken - cue text torn in two by a whitespace-only
+        // line, the tail orphaning where a timing line belongs. The audit
+        // must announce the format failure, not just list comfort findings.
+        $lines = [];
+        for ($i = 1; $i <= 12; $i++) {
+            $start = 4 * ($i - 1);
+            $lines[] = $i . "\r\n" . sprintf('%s --> %s', $this->tc($start), $this->tc($start + 3))
+                . "\r\nThis caption reads fast on purpose for the audit" . ($i === 3 ? "\r\n \r\nand its torn tail orphans here" : '') . "\r\n";
+        }
+        $broken = $this->tmp . '/broken-structure.srt';
+        file_put_contents($broken, implode("\r\n", $lines));
+        try {
+            [$exit, $output] = $this->execute(['--readability', $broken]);
+            $this->assertSame(1, $exit, 'A structurally invalid file must not exit clean');
+            $this->assertStringContainsString('STRUCTURE: INVALID', $output);
+            $this->assertStringContainsString('missing_timestamp', $output);
+            $this->assertStringContainsString('FILE IS STRUCTURALLY INVALID', $output);
+
+            [$exitJson, $outputJson] = $this->execute(['--readability', '--json', $broken]);
+            $this->assertSame(1, $exitJson);
+            $data = json_decode($outputJson, true);
+            $this->assertFalse($data['structure']['valid']);
+            $this->assertSame('missing_timestamp', $data['structure']['errors'][0]['subtype']);
+        } finally {
+            @unlink($broken);
+        }
+    }
+
+    public function testReadabilityJsonCarriesStructureVerdictForCleanFile(): void
+    {
+        [$exit, $output] = $this->execute(['--readability', '--json', $this->fixtures['cleanread']]);
+        $this->assertSame(0, $exit, $output);
+
+        $data = json_decode($output, true);
+        $this->assertTrue($data['structure']['valid']);
+        $this->assertSame([], $data['structure']['errors']);
+    }
 }

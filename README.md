@@ -379,6 +379,15 @@ issues is critical. `--limit N` caps the listing (stats still cover every
 caption); `--worst-first` orders the listing for triage - critical first,
 then fastest reading speed.
 
+The audit also runs the file through the format check and reports the
+verdict: a structurally broken file (production error #42 was exactly this -
+a readability report of only length warnings on an undeliverable file) is
+announced with a `STRUCTURE: INVALID` banner listing every parse error, and
+the RESULT line ends in `FILE IS STRUCTURALLY INVALID`. In `--json`, the
+verdict is the `structure` object (`valid` flag + `errors`). The findings
+below the banner stay advisory reading-comfort values; the exit code is
+non-zero when captions exceed limits *or* the structure is invalid.
+
 Exit codes: `0` every caption is clean, `1` at least one caption exceeds a
 limit, `2` usage error or the file could not be read/parsed.
 
@@ -835,7 +844,9 @@ $analysis = (new ReadabilityChecker())->analyzeFile('Movie.de.srt', 17.0, 37);
 ```
 
 If you already hold parsed caption blocks (the internal format used
-throughout the library), `analyze($blocks)` still runs on them directly.
+throughout the library), `analyze($blocks)` still runs on them directly -
+in that case `structure` stays `null`, since a format verdict needs the raw
+file or content string (bound files keep theirs).
 
 Input errors throw instead of returning partial results: a file that does
 not exist or is not readable throws `InvalidArgumentException`; content the

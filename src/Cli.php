@@ -93,7 +93,10 @@ final class Cli
     /**
      * Single-file readability audit: lists every caption that exceeds the
      * readability limits. Purely advisory - the verdict and defect machinery
-     * are not involved. Exit code is 0 when no caption is problematic.
+     * are not involved, but the file's format-gate verdict IS reported (a
+     * structurally invalid file must not read as a clean advisory report).
+     * Exit code is 0 only when no caption is problematic AND the file
+     * passed the format check.
      */
     private static function runReadability(array $files, array $options): int
     {
@@ -125,7 +128,8 @@ final class Cli
                 $options['max_cps'],
                 $options['max_cpl'],
                 $options['max_lines'],
-                $lang
+                $lang,
+                self::structureSummary((new SubtitleFormatValidator())->validateFile($file))
             );
         } catch (\Throwable $e) {
             // Profile loading fails loudly (missing/corrupt profiles file);
@@ -147,7 +151,28 @@ final class Cli
             ? self::renderReadabilityJson($file, $analysis, $shown, $truncated)
             : self::renderReadabilityReport($file, $analysis, $shown, $truncated);
 
-        return empty($analysis['problems']) ? self::EXIT_OK : self::EXIT_DEFECTS;
+        // The audit stays advisory, but a structurally invalid file is a
+        // real defect: the format check failed, so the file is likely
+        // undeliverable no matter how comfortable its captions read.
+        $structureValid = $analysis['structure']['valid'] ?? true;
+
+        return (empty($analysis['problems']) && $structureValid) ? self::EXIT_OK : self::EXIT_DEFECTS;
+    }
+
+    /**
+     * Compact format-gate verdict for the readability report: the valid
+     * flag plus every parse error, so a broken file cannot present itself
+     * as merely advisory reading-comfort findings.
+     *
+     * @param array{valid: bool, errors?: list<array{line: int, subtype: string, message: string}>} $formatResult
+     * @return array{valid: bool, errors: list<array{line: int, subtype: string, message: string}>}
+     */
+    private static function structureSummary(array $formatResult): array
+    {
+        return [
+            'valid' => (bool) ($formatResult['valid'] ?? false),
+            'errors' => $formatResult['errors'] ?? [],
+        ];
     }
 
     /**
@@ -849,6 +874,7 @@ TXT;
             'max_cpl' => $analysis['max_cpl'],
             'max_cpl_caption' => $analysis['max_cpl_caption'],
             'thresholds' => $analysis['thresholds'],
+            'structure' => $analysis['structure'],
             'problem_count' => count($analysis['problems']),
             'problems_by_type' => $analysis['problems_by_type'],
             'truncated' => $truncated,
@@ -879,10 +905,30 @@ TXT;
         $out .= self::line('Problematic captions', (string)$total);
         $out .= "\n";
 
+        // A structurally invalid file must never read as a clean advisory
+        // report: the format failure is announced before the comfort
+        // findings, which are secondary to "this file is undeliverable".
+        $structure = $analysis['structure'] ?? null;
+        $structureInvalid = $structure !== null && !$structure['valid'];
+        if ($structureInvalid) {
+            $errorCount = count($structure['errors']);
+            $out .= sprintf(
+                "  *** STRUCTURE: INVALID - this file failed the format check (%d parse error%s)\n",
+                $errorCount,
+                $errorCount === 1 ? '' : 's'
+            );
+            foreach ($structure['errors'] as $error) {
+                $out .= sprintf('      - line %d %s: %s' . "\n", $error['line'], $error['subtype'], $error['message']);
+            }
+            $out .= "  The file is likely undeliverable; the findings below are advisory reading-comfort only.\n\n";
+        }
+
         if ($total === 0) {
             $out .= '  No readability problems found.' . "\n\n";
             $out .= $bar . "\n";
-            $out .= '  RESULT: READABLE' . "\n";
+            $out .= $structureInvalid
+                ? '  RESULT: READABLE - BUT STRUCTURALLY INVALID' . "\n"
+                : '  RESULT: READABLE' . "\n";
             $out .= $bar . "\n";
             return $out;
         }
@@ -918,7 +964,11 @@ TXT;
         }
 
         $out .= $bar . "\n";
-        $out .= sprintf('  RESULT: %d problematic caption(s) found' . "\n", $total);
+        $resultLine = sprintf('  RESULT: %d problematic caption(s) found', $total);
+        if ($structureInvalid) {
+            $resultLine .= ' - FILE IS STRUCTURALLY INVALID';
+        }
+        $out .= $resultLine . "\n";
         $out .= $bar . "\n";
 
         return $out;

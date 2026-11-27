@@ -21,6 +21,11 @@ namespace SrtValidator;
  * already have them. Unreadable input throws InvalidArgumentException,
  * unparseable input RuntimeException; there are no partial results.
  *
+ * When the audit comes from a file or content string, the result carries a
+ * `structure` verdict (format-gate valid flag + parse errors) so a
+ * structurally broken file is never presented as just advisory warnings;
+ * with pre-parsed blocks only, `structure` is null.
+ *
  * Limits come from resources/readability-profiles.json, resolved by the
  * optional $lang argument (BCP-47-ish code; null uses the default
  * profile, currently 42 cpl / 20 cps / 2 lines). Explicit numeric
@@ -41,21 +46,28 @@ final class ReadabilityChecker
     /** @var list<array{start: float, end: float, lines: list<string>}>|null */
     private $blocks = null;
 
+    /** @var array{valid: bool, errors: list<array{line: int, subtype: string, message: string}>}|null */
+    private $structure = null;
+
     /**
      * Optionally bind the checker to a subtitle file (.srt or .vtt); the
-     * file is loaded and parsed immediately.
+     * file is loaded and parsed immediately, and its format-gate verdict is
+     * kept for the audit (structure key).
      */
     public function __construct(?string $file = null)
     {
         if ($file !== null) {
             $this->blocks = self::loadBlocks($file);
+            $this->structure = self::structureOf((new SubtitleFormatValidator())->validateFile($file));
         }
     }
 
     /** Load, parse and audit a subtitle file (.srt or .vtt) in one call. */
     public function analyzeFile(string $file, ?float $maxCps = null, ?int $maxCpl = null, ?int $maxLines = null, ?string $lang = null): array
     {
-        return $this->analyze(self::loadBlocks($file), $maxCps, $maxCpl, $maxLines, $lang);
+        $structure = self::structureOf((new SubtitleFormatValidator())->validateFile($file));
+
+        return $this->analyze(self::loadBlocks($file), $maxCps, $maxCpl, $maxLines, $lang, $structure);
     }
 
     /** Parse and audit subtitle content (.srt or .vtt) held in memory. */
@@ -66,13 +78,17 @@ final class ReadabilityChecker
         } catch (\Throwable $e) {
             throw new \RuntimeException('could not parse the subtitle content: ' . $e->getMessage(), 0, $e);
         }
+        $structure = self::structureOf((new SubtitleFormatValidator())->validateContent($content));
 
-        return $this->analyze($blocks, $maxCps, $maxCpl, $maxLines, $lang);
+        return $this->analyze($blocks, $maxCps, $maxCpl, $maxLines, $lang, $structure);
     }
 
     /**
      * @param list<array{start: float, end: float, lines: list<string>}>|null $blocks
      *        pre-parsed caption blocks; null uses the file bound at construction
+     * @param array{valid: bool, errors: list<array{line: int, subtype: string, message: string}>}|null $structure
+     *        format-gate verdict for the audited file (null when the caller
+     *        only has pre-parsed blocks and cannot know)
      * @return array{
      *   captions: int,
      *   analyzed: int,
@@ -83,6 +99,7 @@ final class ReadabilityChecker
      *   max_cpl_caption: int|null,
      *   thresholds: array{max_cps: float, max_cpl: int, max_lines: int},
      *   language: string|null,
+     *   structure: array{valid: bool, errors: list<array{line: int, subtype: string, message: string}>}|null,
      *   problems_by_type: array<string, int>,
      *   problems: list<array{
      *     caption: int,
@@ -103,10 +120,14 @@ final class ReadabilityChecker
         ?float $maxCps = null,
         ?int $maxCpl = null,
         ?int $maxLines = null,
-        ?string $lang = null
+        ?string $lang = null,
+        ?array $structure = null
     ): array {
         if ($blocks === null) {
             $blocks = $this->blocks;
+            if ($structure === null) {
+                $structure = $this->structure;
+            }
         }
         if ($blocks === null) {
             throw new \InvalidArgumentException(
@@ -226,6 +247,7 @@ final class ReadabilityChecker
             'max_cpl_caption' => $maxObservedCplCaption,
             'thresholds' => ['max_cps' => $maxCps, 'max_cpl' => $maxCpl, 'max_lines' => $maxLines],
             'language' => $lang,
+            'structure' => $structure,
             'problems_by_type' => $byType,
             'problems' => $problems,
         ];
@@ -276,5 +298,22 @@ final class ReadabilityChecker
         } catch (\Throwable $e) {
             throw new \RuntimeException('could not parse the subtitle file: ' . $file . ' (' . $e->getMessage() . ')', 0, $e);
         }
+    }
+
+    /**
+     * Compact format-gate verdict for the audit: the valid flag plus every
+     * parse error. The advisory audit never judges a file, but it must not
+     * present a structurally broken one as merely "advisory warnings" - the
+     * consumer decides what to do with the verdict.
+     *
+     * @param array{valid: bool, errors?: list<array{line: int, subtype: string, message: string}>} $formatResult
+     * @return array{valid: bool, errors: list<array{line: int, subtype: string, message: string}>}
+     */
+    private static function structureOf(array $formatResult): array
+    {
+        return [
+            'valid' => (bool) ($formatResult['valid'] ?? false),
+            'errors' => $formatResult['errors'] ?? [],
+        ];
     }
 }

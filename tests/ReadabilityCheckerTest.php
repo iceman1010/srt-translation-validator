@@ -331,4 +331,60 @@ class ReadabilityCheckerTest extends TestCase
         $this->assertSame(9.0, $analysis['thresholds']['max_cps']);
         $this->assertSame(20, $analysis['thresholds']['max_cpl']);
     }
+
+    public function testFileAuditCarriesStructureVerdict(): void
+    {
+        // Production error #42 lesson: the readability-only view of a file
+        // can look like harmless advisory warnings while the file is
+        // structurally broken (here: cue text torn in two by a whitespace
+        // -only line, the tail orphaning where a timing line belongs). The
+        // audit must carry the format-gate verdict so consumers see it.
+        $clean = sys_get_temp_dir() . '/rc-clean-' . uniqid() . '.srt';
+        file_put_contents($clean, "1\n00:00:01,000 --> 00:00:02,000\nHello there, friend.\n");
+        $broken = sys_get_temp_dir() . '/rc-broken-' . uniqid() . '.srt';
+        file_put_contents($broken, "1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated tail\r\n");
+        try {
+            $cleanAudit = (new ReadabilityChecker())->analyzeFile($clean, null, 42, 2, 'en');
+            $this->assertTrue($cleanAudit['structure']['valid'], json_encode($cleanAudit['structure']));
+            $this->assertSame([], $cleanAudit['structure']['errors']);
+
+            $brokenAudit = (new ReadabilityChecker())->analyzeFile($broken, null, 42, 2, 'en');
+            $this->assertFalse($brokenAudit['structure']['valid'], 'The whitespace-split file must fail the structure verdict');
+            $this->assertSame('missing_timestamp', $brokenAudit['structure']['errors'][0]['subtype']);
+            $this->assertGreaterThan(0, $brokenAudit['captions'], 'The advisory analysis still runs on the parseable captions');
+        } finally {
+            @unlink($clean);
+            @unlink($broken);
+        }
+    }
+
+    public function testContentAuditCarriesStructureVerdict(): void
+    {
+        $audit = (new ReadabilityChecker())->analyzeContent("1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated tail\r\n");
+
+        $this->assertFalse($audit['structure']['valid']);
+        $this->assertNotEmpty($audit['structure']['errors']);
+    }
+
+    public function testBoundFileKeepsItsStructureVerdict(): void
+    {
+        $broken = sys_get_temp_dir() . '/rc-bound-' . uniqid() . '.srt';
+        file_put_contents($broken, "1\r\n00:00:01,000 --> 00:00:02,000\r\ntranslated first\r\n \r\ntranslated tail\r\n");
+        try {
+            $analysis = (new ReadabilityChecker($broken))->analyze();
+
+            $this->assertFalse($analysis['structure']['valid'], 'A file bound at construction keeps its format-gate verdict');
+        } finally {
+            @unlink($broken);
+        }
+    }
+
+    public function testBlockOnlyAnalysisHasNullStructure(): void
+    {
+        // Pre-parsed blocks carry no raw file, so there is no format-gate
+        // context to report - the key must exist and stay null.
+        $analysis = (new ReadabilityChecker())->analyze([$this->block(0, 1, ['plain text'])]);
+
+        $this->assertNull($analysis['structure']);
+    }
 }
